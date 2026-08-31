@@ -1,134 +1,95 @@
-# Ruleset Automation with gh-patcher
+# GitHub ruleset automation
 
-## What is gh-patcher?
+`duynhlab/gh-patcher` applies a baseline repository ruleset across the
+organization; CI/CD v2 adds explicit `dev`, `main`, and release-tag controls
+that must be proven on a pilot before fleet rollout.
 
-`duynhlab/gh-patcher` (a private repo in the org) is a CLI tool that batch-applies GitHub branch rulesets across an entire organization via the GitHub REST API. It replaces the need to manually configure branch protection rules on every repository.
+| Fact | Value |
+|------|-------|
+| Automation owner | Private `duynhlab/gh-patcher` repository |
+| Execution | Scheduled and manually dispatchable |
+| Baseline | PR review, required checks, no deletion, no force-push |
+| v2 required context | `check / PR Gate`, subject to pilot verification |
+| Scope gap | Production-source and `v*` tag rules may require manual per-repo configuration |
+| Rollout state | CI/CD v2 consumer adoption not started |
 
-## Why is it needed?
+## Ruleset layers
 
-GitHub **Free** and **Team** plans do not support **organization-level rulesets** (that feature requires Enterprise). Without org-level rulesets, every repository needs its own branch protection configuration — tedious to set up manually and easy to forget for new repos.
+```mermaid
+flowchart TD
+  PILOT["Pilot repository<br/>rulesets in Evaluate"] --> OBSERVE["Observe real check names<br/>and bypass behavior"]
+  OBSERVE --> BASE["dev baseline<br/>PR + PR Gate"]
+  OBSERVE --> MAIN["main source gate<br/>dev or hotfix/*"]
+  OBSERVE --> TAG["v* release-tag protection"]
+  BASE --> ACTIVE["Activate after evidence"]
+  MAIN --> ACTIVE
+  TAG --> ACTIVE
+  ACTIVE --> FLEET["Repository-by-repository rollout"]
 
-`gh-patcher` solves this by:
-
-- Listing all repos in the org
-- Filtering by regex (`REPO_PATTERN`)
-- Applying a standard branch ruleset to each matching repo
-- Running idempotently — safe to re-run daily
-
-## Daily automation
-
-A GitHub Actions workflow runs `gh-patcher` every day at 2:00 AM UTC:
-
-```yaml
-# .github/workflows/apply-rulesets.yml (in the gh-patcher repo)
-on:
-  schedule:
-    - cron: '0 2 * * *'
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry run (true = preview only)'
-        default: 'false'
+  classDef edge fill:#2563eb,color:#fff,stroke:#1e3a8a;
+  classDef service fill:#06b6d4,color:#082f49,stroke:#0e7490;
+  classDef platform fill:#7c3aed,color:#fff,stroke:#5b21b6;
+  classDef data fill:#22c55e,color:#052e16,stroke:#15803d;
+  class PILOT edge;
+  class OBSERVE,ACTIVE platform;
+  class BASE,MAIN,TAG service;
+  class FLEET data;
 ```
 
-This ensures new repositories automatically get the standard ruleset within 24 hours of creation.
+GitHub derives a reusable workflow's status context from the caller **job ID**
+and the called job name. The candidate caller job ID is `check`, and the
+reusable workflow's aggregate job is `PR Gate`, so the expected context is
+`check / PR Gate`. Treat that string as a hypothesis until `gh pr checks` on a
+real consumer PR confirms it.
 
-## How GitHub builds status check names
+## gh-patcher configuration
 
-When a caller workflow invokes a reusable workflow, GitHub constructs the status check name as:
+| Variable | Purpose | Candidate value |
+|----------|---------|-----------------|
+| `GITHUB_TOKEN` | Fine-grained token with repository administration access | Stored as `GH_PATCHER_TOKEN` |
+| `GITHUB_ORG` | Organization to reconcile | `duynhlab` |
+| `REPO_PATTERN` | Repositories to include | `.*-service frontend pkg` |
+| `REPO_EXCLUDE_PATTERN` | Repositories to omit | `^auth-service$` |
+| `STATUS_CHECK_CONTEXTS` | Required status contexts | `check / PR Gate` after pilot confirmation |
+| `DRY_RUN` | Preview without mutation | `true` during migration |
 
-```
-{caller job ID} / {reusable job name}
-```
+The token should receive only the repository administration and metadata access
+needed by the tool. Its exact payload and schedule are owned and verified in the
+private `gh-patcher` repository, not inferred from homelab.
 
-For example, with this caller:
+## Rollout procedure
 
-```yaml
-name: Check               # ← workflow name (display only)
+1. Merge and version `gha-workflows` v2.
+2. Install the four immutable-pinned callers in one service repository.
+3. Create `dev` and run the complete PR, dev artifact, main promotion, release,
+   and main-to-dev synchronization lifecycle.
+4. Read the exact context from `gh pr checks`; update
+   `STATUS_CHECK_CONTEXTS` if it differs.
+5. Apply rulesets in Evaluate mode and inspect rule insights and bypasses.
+6. Activate `dev`, `main`, and tag rules only when the observed behavior matches
+   [`gitflow.md`](gitflow.md).
+7. Expand the repository selector in small batches and retain a rollback record
+   of the previous ruleset payload.
 
-jobs:
-  go-check:                # ← caller job ID (used in check name)
-    uses: org/shared/.github/workflows/go-check.yml@main
-```
+`homelab` itself has repository-specific checks such as manifest validation and
+Markdown links. Do not overwrite those with a Go-service check list.
 
-And this reusable workflow containing a job named `Test`, the actual check run name for ruleset matching is:
+## Verification
 
-```
-go-check / Test
-```
+- A direct push and force-push to both long-lived branches are rejected.
+- A PR cannot merge while the aggregate PR Gate is failing or pending.
+- `main` rejects an ordinary topic branch at both workflow and review-policy
+  layers.
+- Unauthorized users cannot create, move, or delete `v*` tags.
+- A hotfix synchronization PR triggers its checks when created with
+  `SYNC_BRANCH_TOKEN`.
+- Archived repositories and intentionally excluded repositories remain
+  unchanged.
 
-The GitHub UI displays it with additional context: `Check / go-check / Test (pull_request)`, but the shorter form is what rulesets match against. Use `gh pr checks` or the Check Runs API to find the exact name.
+## References
 
-### Why split into check.yml + build.yml
+- [Git workflow](gitflow.md)
+- [CI/CD trust gates](cicd.md)
+- [GitHub rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
 
-Splitting into two files keeps concerns separated:
-
-| File | Trigger | Purpose |
-|------|---------|---------|
-| `check.yml` | `pull_request` (dev/uat/main) | Tests, lint, SonarCloud |
-| `build.yml` | `push` (dev/uat/main) **+ tags `v*`** | Docker build, scan, sign; a `v*` tag also runs the versioned release build + `release-binary` |
-
-The ruleset-required check is: **`go-check / Test`**
-
-## Configuration
-
-### Key environment variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `GITHUB_TOKEN` | Fine-grained PAT with org admin + repo access | (stored as `GH_PATCHER_TOKEN` secret) |
-| `GITHUB_ORG` | Target GitHub organization | `duynhlab` |
-| `REPO_PATTERN` | Regex to match repos (space-separated alternatives = OR) | `.*-service frontend pkg` |
-| `REPO_EXCLUDE_PATTERN` | Regex to exclude repos (e.g. the archived `auth-service`, which `.*-service` would otherwise match) | `^auth-service$` |
-| `STATUS_CHECK_CONTEXTS` | Comma-separated required check names | `go-check / Test` |
-| `DRY_RUN` | Preview mode (no writes) — defaults to `true` | `false` |
-
-> `homelab` itself is governed too, but with different required checks (manifest
-> `validate`, `markdown-links`, `pr-checks` — see [`cicd.md`](cicd.md); `tf-lint`
-> and `gitleaks` are planned there) rather than the Go-service `go-check / Test`
-> context this pattern targets.
-
-### Setting up `GH_PATCHER_TOKEN`
-
-1. Go to **GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens**
-2. Create a token scoped to the `duynhlab` organization with:
-   - **Repository access**: All repositories
-   - **Permissions**: Administration (Read and Write), Contents (Read and Write), Metadata (Read)
-3. Store the token as `GH_PATCHER_TOKEN` in the `gh-patcher` repository secrets
-
-### Adjusting STATUS_CHECK_CONTEXTS
-
-When your CI workflow structure changes (e.g., renaming the caller job ID), update `STATUS_CHECK_CONTEXTS` in `apply-rulesets.yml` to match the new check name.
-
-To find the exact check name:
-1. Open any PR in one of the target repos
-2. Look at the **Checks** tab — the name shown there is the exact context string
-3. Set `STATUS_CHECK_CONTEXTS` to that value
-
-## Ruleset definition
-
-The standard branch ruleset (`gh-standard-branch-ruleset`) enforces:
-
-- **No force push** (non_fast_forward)
-- **No branch deletion** (deletion)
-- **Required status checks** — configurable via `STATUS_CHECK_CONTEXTS`
-- **Required pull request reviews** — at least 1 approval, dismiss stale reviews
-
-> **Coverage:** gh-patcher provisions **only this one ruleset** — the equivalent
-> of gitflow.md section 7's *Base Protection*. The *Production Gate* and *Release
-> Tags* rulesets defined there are **manual/planned**: they are not automated by
-> gh-patcher today and must be created per repo (UI or the `gh api` commands in
-> gitflow.md). The gh-patcher repo's internals are not verifiable from homelab —
-> treat its exact rule payload as owned by that repo.
-
-See [gitflow.md](gitflow.md) section 7 for the full ruleset specification.
-
-## Links
-
-- `duynhlab/gh-patcher` — the tool's repository (private; not link-checkable)
-- [Gitflow standard](gitflow.md)
-- [CI/CD documentation](cicd.md)
-- [Check template](check_template.yml) / [Build template](build_template.yml)
-
----
-_Last updated: 2026-08-19 — build.yml trigger row includes `v*` tags; gh-patcher scope clarified (Base Protection only; Production Gate + Release Tags manual/planned); exclude example for archived auth-service; homelab governance note._
+_Last updated: 2026-08-31._

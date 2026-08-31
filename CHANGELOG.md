@@ -1428,6 +1428,11 @@ Skeleton (copy what you need):
 
 #### Docs
 
+- **The CI/CD v2 candidate is documented as three explicit trust gates.** The
+  platform guide and caller templates now use only `dev` and `main`, separate
+  PR verification from `sha-*` publication and clean `vX.Y.Z` releases, make
+  Sonar's new-code gate blocking, and add hotfix synchronization guidance;
+  consumer and admission adoption remain explicitly planned.
 - **Database documentation now separates PostgreSQL internals, deployed truth,
   operations, and reference material.** Added `docs/databases/README.md`, a
   vendor-neutral fundamentals path for process, memory, storage, WAL, MVCC,

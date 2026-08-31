@@ -1,0 +1,33 @@
+# Candidate pin from gha-workflows PR #119. Replace with the immutable v2
+# release commit before rolling this caller out to service repositories.
+name: Sync Main to Dev
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Open synchronization PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_BRANCH_TOKEN }}
+      - name: Open main-to-dev PR
+        uses: duynhlab/gha-workflows/.github/actions/sync-branches@088207a7b6acf45db1e8e10324d1b6855f60cc12
+        with:
+          source_branch: main
+          target_branch: dev
+          github_token: ${{ secrets.SYNC_BRANCH_TOKEN }}
+          pr_title: 'Sync main back to dev'
+          pr_body: 'Automated synchronization after a main merge.'
+          labels: 'sync,automated'

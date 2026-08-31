@@ -11,10 +11,11 @@ day-2 platform patterns for the duynhlab homelab.
 | **App onboarding** | Domain ResourceSets + InputProviders — [`application-delivery.md`](application-delivery.md) |
 | **Edge** | Envoy Gateway on the Gateway API — [`envoy-gateway.md`](envoy-gateway.md) |
 | **Worker scaling** | KEDA per worker version — [`worker-autoscaling.md`](worker-autoscaling.md) |
-| **Planned (not in homelab yet)** | Prod cluster overlay (`kubernetes/clusters/production/` stub); dev/uat branch CI promotion — see [`gitflow.md`](gitflow.md) + [`cicd.md`](cicd.md) callouts |
+| **CI/CD candidate** | Two-branch `dev`/`main` trust gates in `gha-workflows` PR #119; service-repository adoption not started — [`cicd.md`](cicd.md) |
+| **Planned (not in homelab yet)** | Prod cluster overlay (`kubernetes/clusters/production/` stub); cluster signature/provenance admission enforcement |
 
 > **Homelab vs target:** docs in this folder describe both what runs on **local Kind
-> today** and **policy targets** (prod TLS, dev→uat→main promotion). When a section
+> today** and **policy targets** (prod TLS, dev→main promotion). When a section
 > reads operational but the prod cluster or CI wiring is not live, it is marked
 > **planned** in the source doc or in the table below.
 
@@ -99,15 +100,18 @@ specific Kustomization or run `make sync`.
 | [`worker-autoscaling.md`](worker-autoscaling.md) | Who owns `replicas`, the backlog signal and how to read it, the alert traps a Kind drill exposed |
 | [`kong-gateway.md`](kong-gateway.md) | **Archived** — the previous gateway's guide, kept for reference |
 | [`keycloak.md`](keycloak.md) | The identity provider: deployment, realm import, database, reset procedure, signals |
-| [`cicd.md`](cicd.md) | Polyrepo CI standards, scan-before-push, signing targets |
-| [`gitflow.md`](gitflow.md) | Branching and release policy (**target** — prod cluster TBD) |
+| [`cicd.md`](cicd.md) | PR, dev-artifact, and production-release trust gates; rollout state and operations |
+| [`gitflow.md`](gitflow.md) | Two-branch `dev`/`main` source promotion, hotfix sync, and release policy |
 | [`kyverno.md`](kyverno.md) | Admission policy tiers, Audit→Enforce, PolicyExceptions |
 | [`mcp-servers.md`](mcp-servers.md) | VictoriaMetrics/Logs/Flux/Grafana MCP servers for AI-assisted ops |
 | [`sonarcloud.md`](sonarcloud.md) | Per-repo SonarCloud keys and coverage gates |
 | [`ruleset-automation.md`](ruleset-automation.md) | Org-wide GitHub Ruleset automation via gh-patcher |
 | [`gke-internal-dns.md`](gke-internal-dns.md) | **Reference only** — GKE + Cloud DNS patterns; not homelab topology |
 
-Workflow templates (not prose docs): `build_template.yml`, `check_template.yml`.
+Workflow templates (not prose docs): [`check_template.yml`](check_template.yml),
+[`build_template.yml`](build_template.yml),
+[`release_template.yml`](release_template.yml), and
+[`sync_main_to_dev_template.yml`](sync_main_to_dev_template.yml).
 
 ---
 
@@ -118,4 +122,5 @@ Workflow templates (not prose docs): `build_template.yml`, `check_template.yml`.
 - [`kubernetes/apps/`](../../kubernetes/apps/) — ResourceSets and InputProviders
 - [`terraform/README.md`](../../terraform/README.md) — Flux Operator bootstrap
 
-_Last updated: 2026-08-27 — Kustomization count 22 → 24 (mcp split-out earlier; `openbao-oidc-config-local` added by ADR-062). 2026-08-22 — RFC-0026/ADR-054: the Temporal Worker Controller owns the versioned-worker lifecycle, so `order-worker` is one `WorkerDeployment` and the build id is derived rather than named here. Previously 2026-08-21 — order-worker moved to build `2.4.0` (Temporal SDK v1.48.0; the frozen `1.13.2` had no arm64 leg) and the Kind E2E audit runbook joined the doc map. Previously 2026-08-19 — synced to the deployed platform (22 Kustomizations, back-office portal, `order-worker-1-13-2`, keycloak → monitoring edge)._
+_Last updated: 2026-08-31 — indexed the CI/CD v2 candidate, its four caller
+templates, and the `dev`/`main` model without claiming consumer adoption._
