@@ -91,6 +91,6 @@ and human review still apply.
 
 - [CI/CD trust gates](cicd.md)
 - [SonarCloud test coverage](https://docs.sonarsource.com/sonarqube-cloud/enriching/test-coverage/overview/)
-- [SonarCloud quality gates](https://docs.sonarsource.com/sonarqube-cloud/improving/quality-gates/overview/)
+- [SonarCloud quality gates](https://docs.sonarsource.com/sonarqube-cloud/standards/managing-quality-gates/introduction-to-quality-gates/)
 
 _Last updated: 2026-08-31._
