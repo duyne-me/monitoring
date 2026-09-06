@@ -40,7 +40,6 @@ spec:
         cpu: 20m
         memory: 32Mi
       limits:
-        cpu: 50m
         memory: 64Mi
     
     # Authentication disabled for local dev (enable in production)

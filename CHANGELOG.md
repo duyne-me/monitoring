@@ -347,6 +347,42 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **The platform was throttling its own data path against CPU limits while the
+  nodes sat idle.** Eight containers were throttled 28-64% of CFS periods with the
+  four nodes at 4-13% CPU, no pressure, and requests at 5-10% of allocatable —
+  worst was `vmagent` at **63.8%** while averaging **1m against a 200m limit**.
+  That is CFS quota, not contention: a container limited to 200m gets 20ms per
+  100ms period, and a bursty scrape cycle spends it in the first few ms then
+  sleeps with the machine idle. `grafana` proved the obvious fix wrong — it had
+  already been raised 100m → 300m for exactly this and was still throttled 39.8%.
+  `limits.cpu` is therefore **removed** from ten places: vmagent, grafana, sloth
+  (×2 blocks), vmalertmanager, otel-collector, valkey, and the `platform-db`,
+  `product-db` and `product-db-replica` CNPG clusters — twelve pods. Requests are
+  untouched, so nothing changes for the scheduler and this still fits the machine
+  it fitted before; under contention CFS shares derived from requests arbitrate,
+  and an uncapped container only borrows idle CPU. Memory limits are untouched.
+  Kyverno is satisfied: `require-resources` asks for `requests.{cpu,memory}` and
+  `limits.memory`, never `limits.cpu`.
+  **Two things the rollout taught, both verified on the cluster.** Uncapping CPU
+  OOMKilled vmagent six times: free of the quota it started 47 service-discovery
+  routines and 78 targets at full speed and allocated past its 256Mi ceiling
+  before GC caught up, where throttled it had sat at 129Mi and looked fine. Its
+  memory limit is now 512Mi — the only one raised, after measuring the other eight
+  at 8-38% of theirs. And **deleting a value is not the same as removing a limit**:
+  the sloth chart defaults `resources.limits.cpu: 50m`, so Helm coalescing put it
+  straight back and the pod stayed throttled at 44.7% until the key was set to an
+  explicit `null`.
+- **ClickHouse `limits.memory` 1280Mi → 2Gi.** The old ceiling had started refusing
+  work: **15,678** `MEMORY_LIMIT_EXCEEDED`, and in one two-hour window **2,222
+  failed merges on `system.metric_log`** plus **6 rejected INSERTs into
+  `otel.otel_traces`** — the second is data loss, spans the collector delivered
+  and the server would not take. It is not the container limit that refuses but
+  ClickHouse's own budget: `max_server_memory_usage_to_ram_ratio` is 0.9 against
+  the cgroup, so 1280Mi self-capped at ~1152Mi while the working set peaked at
+  887-899Mi, leaving too little room to merge a ~1,900-column table that collects
+  once a second. Recorded but not pulled: nothing on this platform reads
+  `system.metric_log`, so widening its collect interval would cut the rows instead
+  of raising the ceiling — a behaviour change, kept out of a sizing change.
 - **Two `system.*` tables were still unbounded or oversized on ClickHouse, found
   by auditing a 14-hour-old cluster rather than a fresh one.**
   `query_views_log` had **no TTL at all** — the sixth such table, missed by the

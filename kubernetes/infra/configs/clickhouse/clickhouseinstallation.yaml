@@ -257,16 +257,33 @@ spec:
               # difference between a bounded process and one that helps starve
               # the host.
               #
-              # 1280Mi measured against 711-739Mi steady state across the three
-              # replicas on 2026-09-02 (~1.75x headroom, self-cap 1152Mi). Raise
-              # it if a real query workload arrives; 3x2Gi was sized before
-              # anything ran.
+              # 1280Mi was measured against 711-739Mi steady state on 2026-09-02,
+              # before any real data had accumulated. Raised to 2Gi on 2026-09-06
+              # because that ceiling started refusing work: 15,678
+              # MEMORY_LIMIT_EXCEEDED, and in a two-hour window **2,222 failed
+              # merges on system.metric_log** plus **6 rejected INSERTs into
+              # otel.otel_traces**. The second one is data loss -- spans the
+              # collector delivered and the server would not take.
+              #
+              # It is not the container limit that refuses; it is ClickHouse's own
+              # budget. max_server_memory_usage_to_ram_ratio is 0.9 and the server
+              # reads the cgroup, so 1280Mi self-caps at ~1152Mi. Working set peaks
+              # at 887-899Mi across the replicas, which leaves too little burst room
+              # for merging metric_log -- ~1,900 columns, one row per second per
+              # replica. 2Gi self-caps at ~1843Mi.
+              #
+              # The other lever, not pulled here: metric_log's
+              # collect_interval_milliseconds is 1000, and nothing on this platform
+              # reads system.metric_log (the engine is scraped at :9363 instead), so
+              # the merge cost buys nothing. Widening that interval would cut the
+              # rows rather than raise the ceiling -- a behaviour change, kept
+              # separate from a sizing change.
               resources:
                 requests:
                   cpu: 200m
                   memory: 1Gi
                 limits:
-                  memory: 1280Mi
+                  memory: 2Gi
               livenessProbe:
                 httpGet:
                   path: /ping

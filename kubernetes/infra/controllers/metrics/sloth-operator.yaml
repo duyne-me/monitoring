@@ -38,7 +38,14 @@ spec:
       tag: v0.16.0
     resources:
       limits:
-        cpu: 100m
+        # `null`, not "absent". Deleting the key is not enough here: the sloth
+        # chart ships `resources.limits.cpu: 50m` as a DEFAULT, and Helm's value
+        # coalescing puts it straight back. Verified on the cluster -- after the
+        # key was simply removed, the running pod still carried `cpu: 50m` and was
+        # throttled 44.7%, while the other nine containers in this change came up
+        # genuinely uncapped. An explicit null is how Helm is told to drop an
+        # inherited key. Rationale for removing it at all: victoriametrics/vmagent.yaml.
+        cpu: null
         memory: 128Mi
       requests:
         cpu: 20m
@@ -64,7 +71,6 @@ spec:
         branch: main
         resources:
           limits:
-            cpu: 50m
             memory: 100Mi
           requests:
             cpu: 10m

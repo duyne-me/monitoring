@@ -79,8 +79,13 @@ spec:
               value: "https://github.com/VictoriaMetrics/victoriametrics-datasource/releases/download/v0.25.2/victoriametrics-metrics-datasource-v0.25.2.zip;victoriametrics-metrics-datasource,https://github.com/VictoriaMetrics/victorialogs-datasource/releases/download/v0.29.0/victoriametrics-logs-datasource-v0.29.0.zip;victoriametrics-logs-datasource,grafana-clickhouse-datasource 4.20.0"
             resources:
               limits:
-                # 300m: 100m throttled continuously (KubePodCPUThrottlingHigh).
-                cpu: 300m
+                # NO cpu limit. This read `cpu: 300m`, itself a raise from 100m
+                # with the comment "100m throttled continuously" -- and at 300m it
+                # was STILL throttled 39.8%. That is the argument against picking a
+                # bigger number: a bursty process empties its quota in the first
+                # few ms of each 100ms CFS period however large the quota is.
+                # Removing the limit removes the mechanism. Fleet rationale is in
+                # victoriametrics/vmagent.yaml. memory stays capped.
                 memory: 512Mi
               requests:
                 cpu: 100m
