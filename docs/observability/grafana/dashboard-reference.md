@@ -16,7 +16,7 @@
 3. [Row 2: Traffic & Requests](#row-2-traffic--requests) (4 panels)
 4. [Row 3: Errors & Performance](#row-3-errors--performance) (7 panels)
 5. [Row 4: Go Runtime & HTTP I/O](#row-4-go-runtime--memory) (5 panels)
-6. [Row 5: Resources & Infrastructure — 🗑 REMOVED](#row-5-resources--infrastructure) (historical)
+6. [Row 5: Resources & Infrastructure — 🗑 REMOVED](#row-5-resources--infrastructure---removed-rfc-0017-w3) (historical)
 7. [Rows 6–8: gRPC East-West + Database](#rows-68-grpc-east-west--database-client)
 7. [Common Patterns](#common-patterns)
 8. [Quick Reference](#quick-reference)
