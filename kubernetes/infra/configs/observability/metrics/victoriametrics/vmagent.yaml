@@ -15,13 +15,52 @@ spec:
   remoteWrite:
     - url: "http://vmsingle-victoria-metrics.monitoring.svc:8428/api/v1/write"
 
+  # NO cpu limit, and this is the reference note for the nine other places that
+  # lost one on 2026-09-06.
+  #
+  # Measured: vmagent throttled **63.8%** of CFS periods while the four nodes ran
+  # at 4-13% CPU with no pressure, requests sat at 5-10% of allocatable, and
+  # vmagent's own average draw was 1m against a 200m limit. The throttling had
+  # nothing to do with contention. A container limited to 200m gets 20ms of CPU
+  # per 100ms period; a scrape cycle spends that in the first few ms and then
+  # sleeps through the rest, with the machine idle. grafana proves the obvious
+  # fix wrong -- it had already been raised 100m -> 300m for exactly this, and
+  # was still throttled 39.8%.
+  #
+  # Removing the limit costs nothing to schedule: `requests` is what the
+  # scheduler reserves and it is unchanged, so this fits the same machines it fit
+  # before, laptops included. Under contention CFS shares derived from requests
+  # still arbitrate, and an unlimited container only borrows CPU that is
+  # otherwise idle. Accepted risk: a runaway process takes idle CPU instead of
+  # being capped -- neighbours degrade rather than starve. Same call the Temporal
+  # history service already documents.
+  #
+  # memory limits are NOT touched anywhere ELSE: that ceiling is real, it
+  # prevents OOM, and ClickHouse sizes its own budget from it. vmagent is the one
+  # exception, and it is the interesting one.
+  #
+  # 256Mi -> 512Mi, forced by the CPU change rather than chosen alongside it.
+  # Uncapping CPU let vmagent start its 47 service-discovery routines and 78
+  # targets at full speed instead of dribbling through them at 36% of a 200m
+  # quota, and the startup burst then allocated past 256Mi before GC caught up:
+  # **OOMKilled six times, exit 137**, within minutes of the rollout. Throttled,
+  # it had sat at 129Mi and looked fine.
+  #
+  # The general lesson, and the reason this comment is long: removing a CPU limit
+  # can turn a latent memory ceiling into a crash loop, because the workload now
+  # does in seconds what it used to do in minutes. Check memory headroom on
+  # anything you uncap. The other eight containers in this change were measured
+  # first and sit at 8-38% of their limits, so vmagent was the only one that
+  # needed it.
+  #
+  # Kyverno is satisfied -- require-resources asks for requests.{cpu,memory} and
+  # limits.memory, never limits.cpu.
   resources:
     requests:
       cpu: 50m
       memory: 128Mi
     limits:
-      cpu: 200m
-      memory: 256Mi
+      memory: 512Mi
 
   # RFC-0014 P1 (D-3): OTLP-pushed series carry resource-attr labels
   # (service_name, k8s_namespace_name after Prometheus-naming translation);
