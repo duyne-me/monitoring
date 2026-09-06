@@ -347,6 +347,32 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **ClickHouse `metric_log` now collects every 15 s instead of every second** —
+  the root-cause half of the memory problem that #1001 treated by raising the
+  ceiling. Merge memory scales with **column count**, and `metric_log` carries
+  **1,914 columns** against 24–35 for every other system log table, which is why
+  it produced **32,477 of the 32,614** merge failures in a 24-hour window: a
+  400:1 skew over the next worst table. Nothing on this platform reads
+  `system.metric_log` — the engine's metrics are consumed from its Prometheus
+  endpoint at `:9363`, scraped every 30 s — so a once-per-second in-table copy was
+  paid for and never read. 15 s still leaves twice the resolution of the only
+  consumer while cutting the row rate 15×. Measured before the change: 594 rows
+  per 10 minutes, 35.79 MiB per replica. `error_log` keeps its 1000 ms because its
+  cost is driven by how many errors occur rather than by the interval — 1 row in
+  the same window, 490 KiB total — and per-second resolution on errors is worth
+  having.
+  Verified on the cluster: the row rate went from ~1/s to **8 rows in 120 s**
+  (one every ~15 s), and merges stayed clean.
+- **The earlier `_0` cleanup was incomplete, and its own check hid that.** The
+  ClickHouse rename suffix **increments** — `_0`, `_1`, `_2` — but that pass
+  selected `name LIKE '%_0'` and then confirmed itself with the same filter, so a
+  query that could not see `_1` was used to prove `_1` did not exist. This edit
+  turned up **`trace_log_1` holding 153 MiB at the original 30-day TTL**, plus
+  three generations of `query_views_log`: **~430 MiB** still resident across the
+  three replicas after "0 leftovers remaining" had been reported. All dropped, and
+  the runbook now matches `_log_[0-9]+$` in the title, the drop example and the
+  verification step — the detection query in that section had been right all along
+  and the example beside it had not.
 - **The platform was throttling its own data path against CPU limits while the
   nodes sat idle.** Eight containers were throttled 28-64% of CFS periods with the
   four nodes at 4-13% CPU, no pressure, and requests at 5-10% of allocatable —

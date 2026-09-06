@@ -352,7 +352,7 @@ Two things came out of it. Keep explanatory prose in the **YAML** comments above
 `scripts/flux-validate.sh` now parses every entry in `configuration.files`, so the
 same mistake fails locally instead of on the cluster.
 
-##### After changing a system table's engine: drop the `_0` leftovers
+##### After changing a system table's engine: drop the `_N` leftovers
 
 Observed end to end on 2026-09-06, when `trace_log` and `query_views_log` were
 added to the block. The rename is **per replica and per table, at that table's
@@ -368,8 +368,18 @@ on the same cluster at the same moment:
 `trace_log` flipped instantly on every replica because the memory profiler writes
 to it constantly; `query_views_log` only flipped where a materialized-view insert
 happened to land. **A cleanup pass straight after the apply will therefore miss
-tables**, which is why this is a step to repeat rather than a one-shot. Dropping
-all four leftovers reclaimed **401 MiB** across the three replicas.
+tables**, which is why this is a step to repeat rather than a one-shot.
+
+> **The suffix increments, and matching only `_0` hides the rest.** That first
+> cleanup reported "401 MiB reclaimed, 0 leftovers remaining" and was wrong on the
+> second half: it selected `name LIKE '%_0'`, and so did the check that confirmed
+> it, so a query that could not see `_1` was used to prove `_1` did not exist. A
+> later config edit found **`trace_log_1` holding 153 MiB at the original 30-day
+> TTL** on one replica, plus `query_views_log_0`, `_1` and `_2` — three
+> generations of the same table. Across the three replicas **~430 MiB** was still
+> there. Every engine change mints another generation, so match the number, not
+> the digit zero: `match(name, '_log_[0-9]+$')`, which is what the query below
+> already did and the drop example below did not.
 
 Changing the engine definition does **not** ALTER the table. ClickHouse renames
 the old one to `<name>_0` and creates a fresh one; the renamed copy keeps every
@@ -390,8 +400,10 @@ for i in 0 1 2; do
 done
 ```
 
-Drop what that lists (`DROP TABLE system.<name>_0 SYNC`), then repeat after a
-few hours to catch the tables that had not been written to yet.
+Drop what that lists — `DROP TABLE system.<name> SYNC` for **each** name it
+returns, `_1` and `_2` included — then repeat after a few hours to catch the
+tables that had not been written to yet. Verify with the same `match(...)`
+pattern you dropped with; a narrower check will happily report success.
 
 ### Query examples
 

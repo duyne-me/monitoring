@@ -146,6 +146,26 @@ spec:
     # to its own trace_log template is silently ignored here, so re-read that file
     # on operator bumps.
     #
+    # metric_log collect_interval_milliseconds: 1000 -> 15000 (2026-09-06).
+    #
+    # This is the root-cause half of the ClickHouse memory problem; raising
+    # limits.memory to 2Gi was the symptom half. Merge memory scales with COLUMN
+    # count, and metric_log has 1,914 columns against 24-35 for every other system
+    # log table -- which is why it produced 32,477 of the 32,614 merge failures in
+    # a 24-hour window, a 400:1 skew over the next table. Fewer rows means fewer
+    # and smaller parts to merge.
+    #
+    # Nothing on this platform reads system.metric_log. The engine's metrics are
+    # consumed from its Prometheus endpoint at :9363, scraped by a ServiceMonitor
+    # every 30 s, so a once-per-second in-table copy is paid for and never read.
+    # 15 s still leaves twice the resolution of the only consumer, while cutting
+    # the row rate 15x: measured before the change, 594 rows per 10 minutes and
+    # 35.79 MiB on disk per replica.
+    #
+    # error_log keeps its 1000 ms. Its cost is driven by how many errors occur,
+    # not by the interval -- 1 row in the same 10-minute window, 490 KiB total --
+    # and per-second resolution on errors is worth having.
+    #
     # ONE MANUAL STEP REMAINS -- see docs/observability/clickhouse/README.md
     # "The engine's own log tables". Changing a system table's engine definition
     # does not ALTER it: ClickHouse renames the old table to `<name>_0` and
@@ -161,7 +181,7 @@ spec:
                 <table>metric_log</table>
                 <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-                <collect_interval_milliseconds>1000</collect_interval_milliseconds>
+                <collect_interval_milliseconds>15000</collect_interval_milliseconds>
             </metric_log>
             <asynchronous_metric_log replace="1">
                 <database>system</database>
@@ -272,12 +292,10 @@ spec:
               # for merging metric_log -- ~1,900 columns, one row per second per
               # replica. 2Gi self-caps at ~1843Mi.
               #
-              # The other lever, not pulled here: metric_log's
-              # collect_interval_milliseconds is 1000, and nothing on this platform
-              # reads system.metric_log (the engine is scraped at :9363 instead), so
-              # the merge cost buys nothing. Widening that interval would cut the
-              # rows rather than raise the ceiling -- a behaviour change, kept
-              # separate from a sizing change.
+              # The other lever, pulled separately on 2026-09-06: metric_log's
+              # collect_interval_milliseconds went 1000 -> 15000. See the note on
+              # that setting below. Raising this ceiling stopped the bleeding;
+              # widening the interval is what removes the pressure.
               resources:
                 requests:
                   cpu: 200m
