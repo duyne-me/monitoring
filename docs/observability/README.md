@@ -303,7 +303,7 @@ docs/observability/
 │   ├── README.md                 # Grafana overview: 42 dashboard CRs / 12 folders, delivery patterns, plugins
 │   ├── rbac-multi-team.md        # Staff-SSO group→role mapping (ADR-062), Teams, folder permissions
 │   ├── datasources.md            # Dual datasource strategy (case study)
-│   ├── dashboard-reference.md    # Microservices dashboard (40 panels, 6 rows)
+│   ├── dashboard-reference.md    # Microservices dashboard (~41 panels, 8 rows)
 │   └── variables.md              # Dashboard variables & regex
 │
 ├── alerting/                     # Alerting rules

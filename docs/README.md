@@ -97,7 +97,7 @@ docs/
 │   │   ├── README.md             # Grafana overview + plugins
 │   │   ├── rbac-multi-team.md    # Staff-SSO group→role mapping (ADR-062), Teams, folder permissions
 │   │   ├── datasources.md        # Dual datasource strategy (case study)
-│   │   ├── dashboard-reference.md # Microservices dashboard (40 panels)
+│   │   ├── dashboard-reference.md # Microservices dashboard (~41 panels)
 │   │   └── variables.md          # Dashboard variables & regex
 │   ├── alerting/                 # Alerting rules
 │   │   ├── README.md             # 2-layer alerting strategy
@@ -340,7 +340,7 @@ Clone all repositories: [platform/setup.md](./platform/setup.md).
 - [Metrics Guide](./observability/metrics/README.md) - Comprehensive metrics documentation
 - [PromQL Guide](./observability/metrics/promql-guide.md) - Complete guide to PromQL functions, time range vs rate interval, and counter handling
 - [Variables & Regex](./observability/grafana/variables.md) - Filter patterns
-- [Grafana Dashboard Guide](./observability/grafana/dashboard-reference.md) - Complete SRE/DevOps dashboard reference (40 panels + annotations planning)
+- [Grafana Dashboard Guide](./observability/grafana/dashboard-reference.md) - Complete SRE/DevOps dashboard reference (~41 panels + annotations planning)
 
 #### SLO/SRE
 - [SLO Overview](./observability/slo/README.md) - Architecture, SLI definitions, targets
