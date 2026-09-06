@@ -5,12 +5,18 @@ kind: Kustomization
 resources:
   - backup-alerts.yaml
   - deep-signals-alerts.yaml
+  - replication-health.yaml
   - cnpg/cluster-fenced.yaml
   - cnpg/cluster-ha-critical.yaml
   - cnpg/cluster-ha-warning.yaml
   - cnpg/cluster-high_connection-critical.yaml
   - cnpg/cluster-high_connection-warning.yaml
-  - cnpg/cluster-high_replication_lag.yaml
+  # REPLACED 2026-09-06 by replication-health.yaml (hand-authored). The chart's
+  # physical-lag rules read a time-based metric that grows without bound on an
+  # idle cluster, and their pod selector excluded the product-db-replica DR
+  # cluster entirely; high_replication_lag was also a byte-for-byte duplicate of
+  # physical_replication_lag-warning. Full reasoning in that file's header.
+  # - cnpg/cluster-high_replication_lag.yaml
   - cnpg/cluster-logical_replication_errors-critical.yaml
   - cnpg/cluster-logical_replication_errors.yaml
   - cnpg/cluster-logical_replication_lagging-critical.yaml
@@ -18,8 +24,8 @@ resources:
   - cnpg/cluster-logical_replication_stopped-critical.yaml
   - cnpg/cluster-logical_replication_stopped.yaml
   - cnpg/cluster-offline.yaml
-  - cnpg/cluster-physical_replication_lag-critical.yaml
-  - cnpg/cluster-physical_replication_lag-warning.yaml
+  # - cnpg/cluster-physical_replication_lag-critical.yaml
+  # - cnpg/cluster-physical_replication_lag-warning.yaml
   - cnpg/cluster-wal-size-high.yaml
   # Homelab default: gated — uncomment when production-ready (KSM zone labels for spread; kube_pod_info for colocation). See cnpg/README.md.
   # - cnpg/cluster-instances_on_same_node.yaml
@@ -34,7 +40,7 @@ resources:
   - cnpg-platform-db/cluster-ha-warning.yaml
   - cnpg-platform-db/cluster-high_connection-critical.yaml
   - cnpg-platform-db/cluster-high_connection-warning.yaml
-  - cnpg-platform-db/cluster-high_replication_lag.yaml
+  # - cnpg-platform-db/cluster-high_replication_lag.yaml
   - cnpg-platform-db/cluster-logical_replication_errors-critical.yaml
   - cnpg-platform-db/cluster-logical_replication_errors.yaml
   - cnpg-platform-db/cluster-logical_replication_lagging-critical.yaml
@@ -42,8 +48,8 @@ resources:
   - cnpg-platform-db/cluster-logical_replication_stopped-critical.yaml
   - cnpg-platform-db/cluster-logical_replication_stopped.yaml
   - cnpg-platform-db/cluster-offline.yaml
-  - cnpg-platform-db/cluster-physical_replication_lag-critical.yaml
-  - cnpg-platform-db/cluster-physical_replication_lag-warning.yaml
+  # - cnpg-platform-db/cluster-physical_replication_lag-critical.yaml
+  # - cnpg-platform-db/cluster-physical_replication_lag-warning.yaml
   - cnpg-platform-db/cluster-wal-size-high.yaml
   # Homelab default: gated — same rules as cnpg/ block above. See cnpg/README.md.
   # - cnpg-platform-db/cluster-instances_on_same_node.yaml

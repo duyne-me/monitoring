@@ -347,6 +347,36 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **The CNPG physical-replication alerts measured the wrong thing and excluded
+  the DR cluster.** Found while auditing three of them that looked like false
+  positives — they were not. Six chart-generated rules are replaced by a
+  hand-authored `replication-health.yaml`:
+  `cnpg_pg_replication_lag` is `now() - pg_last_xact_replay_timestamp()`, so on a
+  standby with nothing to replay it grows without bound: an **idle** cluster
+  reported 45 minutes of "lag" while `pg_stat_replication` showed **0 bytes**
+  behind. `platform-db` never showed it (Temporal and Keycloak write constantly);
+  `product-db` is idle between load runs and did. The two lag alerts keep their
+  names, and their runbooks, but now read
+  `cnpg_pg_replication_slots_pg_wal_lsn_diff` from the **primary's** view — 0
+  bytes when caught up, however long the cluster has been quiet. Replicas report a
+  stale copy of that metric, one measured at `-134193152`, which is why the
+  selector pins the primary role.
+  The chart selector `pod=~"<cluster>-([1-9][0-9]*)$"` never matched
+  `product-db-replica-1`, so **the entire DR cluster was outside replication
+  alerting**. New `CNPGClusterStandbyNotStreaming` — in recovery with no WAL
+  receiver — covers every instance with no pod-name filter, and is idle-immune
+  because a healthy quiet standby keeps its receiver up. Verified on the cluster:
+  it fires for `product-db-3` **and** `product-db-replica-1`, and for neither of
+  the two healthy in-recovery `platform-db` standbys.
+  `CNPGClusterHighReplicationLag` is removed: it was byte-for-byte identical to
+  `CNPGClusterPhysicalReplicationLagWarning` — same expression, same `for`, same
+  severity — so every warning arrived twice per cluster. Its runbook is deleted
+  and the four references to it repointed.
+  Not a duplicate of the existing `CNPGInactiveSlotRetainingWAL`, and the new file
+  says why: that rule additionally requires an **inactive** slot and owns the
+  WAL-reclaim procedure, while the lag rules fire for a replica that is still
+  attached and merely behind. Both were correct simultaneously during the incident
+  that prompted this.
 - **ClickHouse `metric_log` now collects every 15 s instead of every second** —
   the root-cause half of the memory problem that #1001 treated by raising the
   ceiling. Merge memory scales with **column count**, and `metric_log` carries
