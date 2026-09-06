@@ -340,6 +340,48 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **Two `system.*` tables were still unbounded or oversized on ClickHouse, found
+  by auditing a 14-hour-old cluster rather than a fresh one.**
+  `query_views_log` had **no TTL at all** — the sixth such table, missed by the
+  original audit because ClickHouse creates system log tables **lazily** and this
+  one is only born when a materialized view runs. There is exactly one on this
+  platform, `otel.otel_traces_trace_id_ts_mv`, and every row in the table names
+  it: the table grows with our own trace ingestion, one row per insert batch.
+  The `README` had actually predicted the lazy arrival, but described the late
+  tables as "carrying upstream defaults" — true for `asynchronous_insert_log`
+  (3 d) and `blob_storage_log` (30 d), and false for this one, which upstream
+  ships with none. It now takes 7 d on daily partitions like the other five.
+  **`trace_log` is the bigger one:** 6.3 M rows / 145 MiB at 14 hours, the largest
+  `system.*` table, projecting to **7.3 GiB per replica** at the operator's 30-day
+  TTL — 22 GiB across three, against 10 Gi PVCs that local-path does not enforce,
+  so nothing would have stopped it. And it is not query traffic: `query_log`
+  recorded 2–40 queries in those hours while **95 %** of `trace_log` samples were
+  `Memory` / `MemoryPeak`, the memory profiler firing every 4 MiB of allocation by
+  any thread, merges included. This repo now overrides the operator to 7 d
+  (≈1.7 GiB/replica) — `config.d` loads lexicographically and ours is `02-` against
+  the operator's `01-`. Disabling the profiler was rejected: the cluster runs a
+  1.12 GiB self-cap that has already refused ad-hoc admin queries, so the samples
+  are worth a week. The audit method is fixed too, because enumerating
+  `system.tables` is what let a lazily-created table hide: the doc now also
+  enumerates the server's **declared** `<*_log>` sections (24 declared, 13 born)
+  and reports real TTL day counts instead of a has/hasn't flag.
+  Verified on the running cluster, including the manual half: after the sync,
+  `trace_log` came back at 7 d on all three replicas and the documented `_0`
+  leftovers appeared — 401 MiB of them, now dropped. The rename is **per replica
+  and per table, at that table's first write**, which showed plainly here:
+  `trace_log` flipped instantly everywhere because the memory profiler writes to
+  it constantly, while `query_views_log` flipped only on the replica where a
+  materialized-view insert happened to land. A cleanup pass straight after an
+  apply will miss tables.
+- **`make validate` now parses the XML embedded in the `ClickHouseInstallation`.**
+  Nothing did before: kustomize, kubeconform and the CRD schema all see
+  `spec.configuration.files` as a string, and ClickHouse is the first reader — at
+  startup, where a malformed file is `SAXParseException: Invalid token`, the
+  server refuses to boot, and the operator walks it into `CrashLoopBackOff` one
+  replica at a time. That is not hypothetical: writing an em-dash as `--` inside
+  an XML comment, which XML forbids, crash-looped `chi-clickhouse-otel-0-0-0`
+  while `make validate` reported success. The check is a few lines, fails locally
+  with the cause named, and was negative-tested against the exact defect.
 - **One core alert could never fire, and one fired on normal control flow.** Found
   by auditing a **14-hour-old** cluster: every metric name referenced by an
   alerting rule was extracted and diffed against the `__name__` values the TSDB
