@@ -117,7 +117,7 @@ Three details, each found by measuring rather than reasoning:
 ## References
 
 - [`CNPGClusterPhysicalReplicationLagCritical`](CNPGClusterPhysicalReplicationLagCritical.md)
-  and [`CNPGClusterHighReplicationLag`](CNPGClusterHighReplicationLag.md) — the symptom side
+  and [`CNPGClusterPhysicalReplicationLagCritical`](CNPGClusterPhysicalReplicationLagCritical.md) — the symptom side
 - [`CNPGWALArchiveFailing`](CNPGWALArchiveFailing.md) — the other way WAL piles up, and the disk-full misdirection
 - [alert catalog](../../alerting/alert-catalog.md)
 

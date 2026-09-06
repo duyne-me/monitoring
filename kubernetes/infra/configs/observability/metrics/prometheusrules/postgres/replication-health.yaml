@@ -1,0 +1,110 @@
+# Hand-authored physical-replication alerts (NOT chart-generated), replacing six
+# chart rules that are commented out of kustomization.yaml beside their entries.
+#
+# WHY THE CHART RULES WERE REPLACED, measured on 2026-09-06 during a real
+# incident on `product-db`:
+#
+# 1. `cnpg_pg_replication_lag` is `now() - pg_last_xact_replay_timestamp()`. On a
+#    standby with nothing to replay it grows without bound, so an IDLE cluster
+#    reports minutes of "lag" while `pg_stat_replication` shows 0 bytes behind.
+#    `platform-db` never shows this because Temporal and Keycloak write to it
+#    constantly; `product-db` is idle between load runs, and did.
+# 2. The chart selector `pod=~"<cluster>-([1-9][0-9]*)$"` does not match
+#    `product-db-replica-1`, so the **entire DR cluster was excluded from
+#    replication alerting**. It sat 896 MB behind with no WAL receiver for over
+#    an hour and nothing fired.
+# 3. `CNPGClusterHighReplicationLag` and `CNPGClusterPhysicalReplicationLagWarning`
+#    were byte-for-byte identical -- same expression, same `for: 5m`, same
+#    `severity: warning` -- so every warning arrived twice, per cluster.
+#
+# The two lag alerts keep their names so the existing runbooks stay linked, but
+# they now measure BYTES, not milliseconds. A byte count is 0 when a replica is
+# caught up regardless of how long the cluster has been idle, which is the point.
+#
+# WHAT EACH SIGNAL CAN AND CANNOT SEE. `cnpg_pg_replication_slots_pg_wal_lsn_diff`
+# is only authoritative from the PRIMARY's view (replicas report a stale, at times
+# negative, copy -- measured `-134193152` on one). And a designated-replica cluster
+# streams from its source WITHOUT a slot on that source, so the byte metric cannot
+# see the DR cluster falling behind `product-db` at all. That gap is why
+# CNPGClusterStandbyNotStreaming exists: a disconnect is visible from the standby
+# side even when the byte view is not. Still uncovered, and stated rather than
+# hidden: a DR cluster that is connected but applying slowly. Only the time-based
+# metric could see that, and on an idle source it cannot be trusted.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-replication-health
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: postgres-replication-health
+    platform.duynhlab.dev/source: homelab-authored
+spec:
+  groups:
+    - name: postgres-replication-health
+      rules:
+        # A standby that is not streaming. This is the rule that would have caught
+        # the 2026-09-06 incident: a failover moved the cluster to timeline 3 and
+        # both `product-db-3` and the whole `product-db-replica` DR cluster were
+        # stranded on timeline 2, refusing the future timeline history file, with
+        # `pg_stat_wal_receiver` empty. CNPG still reported every instance
+        # `healthy`, so this is not visible from cluster status.
+        #
+        # Idle-immune by construction: a healthy idle standby keeps its receiver
+        # up and simply has nothing to replay. Verified on the cluster -- the
+        # expression matched exactly the two broken instances and neither of the
+        # two healthy in-recovery `platform-db` standbys.
+        - alert: CNPGClusterStandbyNotStreaming
+          expr: |
+            cnpg_pg_replication_in_recovery == 1
+            and on (namespace, pod) cnpg_pg_replication_is_wal_receiver_up == 0
+          for: 5m
+          labels:
+            severity: critical
+            category: databases
+          annotations:
+            summary: "CNPG standby not streaming ({{ $labels.namespace }}/{{ $labels.pod }})"
+            description: "{{ $labels.pod }} in cluster {{ $labels.cnpg_io_cluster }} is in recovery but has no WAL receiver, so it is not replicating. It will fall further behind until it is rejoined, and the primary retains WAL for its slot in the meantime. A timeline mismatch after a failover is the usual cause - check the pod log for 'Refusing to restore future timeline history file'."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/postgresql/CNPGClusterStandbyNotStreaming.md"
+
+        # Byte lag, read from the primary's slot view. 100 MB is roughly six 16 MB
+        # WAL segments -- enough to ignore normal streaming jitter, small enough to
+        # notice a replica that has stopped keeping up.
+        - alert: CNPGClusterPhysicalReplicationLagWarning
+          expr: |
+            max by (namespace, cnpg_io_cluster, slot_name) (
+              cnpg_pg_replication_slots_pg_wal_lsn_diff{cnpg_io_instanceRole="primary"}
+            ) > 100e6
+          for: 5m
+          labels:
+            severity: warning
+            category: databases
+          annotations:
+            summary: "CNPG replica behind by >100MB ({{ $labels.cnpg_io_cluster }} / {{ $labels.slot_name }})"
+            description: "Replication slot {{ $labels.slot_name }} on cluster {{ $labels.cnpg_io_cluster }} is {{ $value | humanize1024 }}B of WAL behind the primary. The slot name identifies the replica. Unlike the chart's time-based rule this cannot fire on an idle cluster: a caught-up replica reads 0 bytes however long nothing has been written."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/postgresql/CNPGClusterPhysicalReplicationLagWarning.md"
+
+        # 1 GB is ~64 WAL segments.
+        #
+        # NOT a duplicate of CNPGInactiveSlotRetainingWAL in deep-signals-alerts.yaml,
+        # though the byte thresholds nearly coincide (1e9 here, 1 GiB there). That
+        # rule additionally requires `cnpg_pg_replication_slots_active == 0`, so it
+        # fires for a slot whose replica is GONE and frames the problem as WAL
+        # retention. This one has no such condition and fires for a replica that is
+        # still attached and simply cannot keep up. During the 2026-09-06 incident
+        # both were true at once and both are correct; on a slow-but-connected
+        # replica only this one fires, and on a dead slot the other one carries the
+        # disk-fill framing and the reclaim procedure.
+        - alert: CNPGClusterPhysicalReplicationLagCritical
+          expr: |
+            max by (namespace, cnpg_io_cluster, slot_name) (
+              cnpg_pg_replication_slots_pg_wal_lsn_diff{cnpg_io_instanceRole="primary"}
+            ) > 1e9
+          for: 5m
+          labels:
+            severity: critical
+            category: databases
+          annotations:
+            summary: "CNPG replica behind by >1GB ({{ $labels.cnpg_io_cluster }} / {{ $labels.slot_name }})"
+            description: "Replication slot {{ $labels.slot_name }} on cluster {{ $labels.cnpg_io_cluster }} is {{ $value | humanize1024 }}B behind. The primary is retaining at least that much WAL for the slot, so this is a disk-fill risk as well as a redundancy one. If the slot is inactive the replica is gone rather than slow - CNPGClusterStandbyNotStreaming names the instance and CNPGInactiveSlotRetainingWAL owns the WAL-reclaim procedure."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/postgresql/CNPGClusterPhysicalReplicationLagCritical.md"

@@ -25,8 +25,8 @@ alerts, and operator health. One file per alert name — each file covers both
 | CNPGClusterHighConnectionsCritical | critical | chart | active | [CNPGClusterHighConnectionsCritical.md](CNPGClusterHighConnectionsCritical.md) |
 | CNPGClusterHighConnectionsWarning | warning | chart | active | [CNPGClusterHighConnectionsWarning.md](CNPGClusterHighConnectionsWarning.md) |
 | CNPGClusterPhysicalReplicationLagCritical | critical | chart | active | [CNPGClusterPhysicalReplicationLagCritical.md](CNPGClusterPhysicalReplicationLagCritical.md) |
+| CNPGClusterStandbyNotStreaming | critical | homelab-authored | active | [CNPGClusterStandbyNotStreaming.md](CNPGClusterStandbyNotStreaming.md) |
 | CNPGClusterPhysicalReplicationLagWarning | warning | chart | active | [CNPGClusterPhysicalReplicationLagWarning.md](CNPGClusterPhysicalReplicationLagWarning.md) |
-| CNPGClusterHighReplicationLag | warning | chart | active | [CNPGClusterHighReplicationLag.md](CNPGClusterHighReplicationLag.md) |
 | CNPGClusterLowDiskSpaceCritical | critical | chart | inactive on Kind | [CNPGClusterLowDiskSpaceCritical.md](CNPGClusterLowDiskSpaceCritical.md) |
 | CNPGClusterLowDiskSpaceWarning | warning | chart | inactive on Kind | [CNPGClusterLowDiskSpaceWarning.md](CNPGClusterLowDiskSpaceWarning.md) |
 | PostgresWALSizeHigh | warning | homelab-extra | active | [PostgresWALSizeHigh.md](PostgresWALSizeHigh.md) |
