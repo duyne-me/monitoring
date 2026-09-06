@@ -27,14 +27,15 @@
 9. [Product and interaction design](#product-and-interaction-design)
 10. [vs platform as-built](#vs-platform-as-built)
 11. [Integration paths](#integration-paths)
-12. [Security and authorization](#security-and-authorization)
-13. [Failure model and operations](#failure-model-and-operations)
-14. [Alternatives](#alternatives)
-15. [Open questions](#open-questions)
-16. [FAQ](#faq)
-17. [References](#references)
-18. [Context7 audit log](#context7-audit-log)
-19. [Research review gate](#research-review-gate)
+12. [Deferred CDC adoption dossier](#deferred-cdc-adoption-dossier)
+13. [Security and authorization](#security-and-authorization)
+14. [Failure model and operations](#failure-model-and-operations)
+15. [Alternatives](#alternatives)
+16. [Open questions](#open-questions)
+17. [FAQ](#faq)
+18. [References](#references)
+19. [Context7 audit log](#context7-audit-log)
+20. [Research review gate](#research-review-gate)
 
 ---
 
@@ -538,7 +539,9 @@ serialization, pagination recovery, and service CPU load. It also makes a
 WAL decoding provides lower latency and delete capture, but requires slots,
 publication ownership, schema evolution handling, replay offsets, and a durable
 consumer. The 15-minute product goal does not currently justify this operational
-surface. CDC remains the scale escape hatch, not an MVP badge.
+surface. CDC remains the scale escape hatch, not an MVP badge. The
+[deferred adoption dossier](#deferred-cdc-adoption-dossier) records what must be
+proved if those economics change; it is not approval to deploy CDC.
 
 ### Candidate Flux order
 
@@ -568,6 +571,296 @@ flowchart LR
 The later RFC must not make every application depend on ClickHouse merely to
 order one analytical workload. A dedicated wave is preferable to adding
 `clickhouse-schema` to the global `apps-local` dependency set.
+
+---
+
+## Deferred CDC adoption dossier
+
+This section is deliberately shaped so a future architecture review can turn
+it into a v2 ADR without rediscovering the mechanism. It is **research**, not a
+reserved ADR number, accepted decision, implementation plan, or authorization
+to install PeerDB.
+
+| Decision boundary | Research position |
+|-------------------|-------------------|
+| Current transport | Keep the 15-minute batch and its repair cycle |
+| Future candidate | Self-hosted PeerDB, because it is purpose-built for PostgreSQL → ClickHouse and does not require a broker |
+| Candidate maturity | Reference only; version, license, images, chart, APIs, and compatibility must be revalidated at adoption time |
+| Promotion rule | A measured trigger plus a successful failure-oriented prototype is required before creating a Proposed ADR |
+| Permanent authority | PostgreSQL remains the system of record; ClickHouse remains rebuildable |
+
+### When CDC becomes a real decision
+
+Open an architecture review only when production-like evidence shows at least
+one of these conditions:
+
+- product freshness must be below five minutes rather than the current
+  15-minute contract;
+- a batch takes more than ten minutes twice in succession or repeatedly
+  overlaps its next schedule;
+- a source export query exceeds five seconds p95 after indexing, time bounds,
+  and replica placement have been exhausted;
+- changed volume approaches roughly five million rows per day;
+- a hard-delete stream becomes a correctness requirement; or
+- repeated incremental scans measurably disturb a CNPG primary or replica.
+
+These are review triggers, not automatic selection criteria. The future ADR
+must attach the measurements and state the new freshness and recovery SLOs.
+
+### Existing prerequisites and remaining gaps
+
+The product cluster is closer to CDC-ready than a default PostgreSQL install,
+but `wal_level=logical` is only one prerequisite:
+
+| Concern | As built | Still required before adoption |
+|---------|----------|--------------------------------|
+| PostgreSQL | 18.1; `wal_level=logical`; `max_wal_senders=10` | Size `max_replication_slots`, `max_slot_wal_keep_size`, connections, WAL storage, and sender capacity from measured load |
+| CNPG failover | Three instances; `synchronizeLogicalDecoding=true`; `hot_standby_feedback=on`; `sync_replication_slots=on` | Prove each user-created slot is failover-ready and the consumer resumes through the read-write Service |
+| Source contracts | Three PII-minimised export views are the batch direction | CDC cannot publish views; define safe base/projection tables and replica identities |
+| ClickHouse | Replicated 1 shard × 3 replicas | Create isolated raw/serving objects, identities, quotas, capacity budget, and rebuild path |
+| Workflow engine | Temporal is deployed for application workflows | Prove PeerDB chart/API compatibility and isolation before deciding whether a dedicated Temporal namespace is sufficient |
+| PeerDB | Not deployed | Pin images/charts; provide catalog and staging storage, workers, control plane, secrets, NetworkPolicy, metrics, alerts, and runbooks |
+
+Do not count the existing PostgreSQL settings as proof of end-to-end failover.
+PostgreSQL slot synchronization is asynchronous, and a non-PostgreSQL consumer
+still needs a measured reconnect/no-gap test after CNPG promotion.
+
+### Reference topology
+
+This diagram answers one question: **what would have to exist between the three
+database-local WAL streams and the analytical read model?** Every CDC-specific
+node and edge is reference-only.
+
+```mermaid
+flowchart LR
+  subgraph PG["product-db — deployed CNPG cluster"]
+    ORD[("order DB<br/>publication + slot<br/>reference")]
+    CHK[("checkout DB<br/>publication + slot<br/>reference")]
+    PAY[("payment DB<br/>publication + slot<br/>reference")]
+  end
+
+  RW["CNPG read-write Service<br/>follows primary"]
+
+  subgraph PDB["PeerDB control plane — reference, not deployed"]
+    FLOW["flow worker<br/>three mirrors"]
+    SNAP["snapshot worker"]
+    CAT[("PeerDB catalog")]
+    TEMP["Temporal namespace or dedicated cluster<br/>decision pending prototype"]
+    STAGE[("S3-compatible staging<br/>reference")]
+  end
+
+  subgraph CH["ClickHouse — deployed engine"]
+    RAW[("CDC raw tables<br/>ReplacingMergeTree<br/>reference")]
+    SERVE[("commerce serving model<br/>reference")]
+  end
+
+  API["analytics-service<br/>reference"]
+
+  ORD & CHK & PAY -.->|"database-local pgoutput streams<br/>reference"| RW
+  RW -.->|"direct TLS; never PgDog<br/>reference"| FLOW
+  SNAP -.->|"bounded initial copy<br/>reference"| STAGE
+  FLOW -.->|"versioned CDC batches<br/>reference"| STAGE
+  STAGE -.->|"ClickHouse reads staged files<br/>reference"| RAW
+  FLOW --- CAT
+  FLOW --- TEMP
+  RAW -.->|"deduplicate and reconcile<br/>reference"| SERVE
+  SERVE -.->|"bounded SELECT<br/>reference"| API
+
+  classDef service fill:#06b6d4,color:#082f49,stroke:#0e7490;
+  classDef worker fill:#f59e0b,color:#451a03,stroke:#b45309;
+  classDef platform fill:#7c3aed,color:#fff,stroke:#5b21b6;
+  classDef data fill:#22c55e,color:#052e16,stroke:#15803d;
+  classDef planned fill:#fff,color:#475569,stroke:#64748b,stroke-dasharray:5 5;
+  class RW data;
+  class ORD,CHK,PAY,FLOW,SNAP,CAT,TEMP,STAGE,RAW,SERVE,API planned;
+```
+
+**Legend** — green: deployed data endpoint · dashed border/edge: reference,
+not deployed. A publication and replication slot live inside one database, so
+`order`, `checkout`, and `payment` require three independent streams and
+watermarks even though they share one CNPG cluster.
+
+PeerDB itself is not one stateless connector. Its published Kubernetes shape
+includes flow workers, a snapshot worker, an API/control surface, a PostgreSQL
+catalog, Temporal orchestration, and object storage staging for ClickHouse
+loads. Reusing the deployed Temporal server or RustFS could save infrastructure,
+but it must not couple commerce replication failure, retention, or upgrade
+policy to application workflows and backups without namespace/bucket isolation,
+quotas, compatibility, and recovery tests. Default to a dedicated Temporal
+namespace and staging bucket; deploy dedicated dependencies only if the
+prototype disproves safe sharing. Keep the PeerDB UI and administrative APIs
+cluster-internal unless a separately authenticated operational use case exists.
+
+### Publication and data-minimisation boundary
+
+PostgreSQL logical publications accept persistent base or partitioned tables,
+not ordinary or materialized views. That breaks the batch design's strongest
+security property: `analytics_export` views can expose a reviewed projection
+without giving the reader access to sensitive base rows.
+
+The future design must evaluate two honest contracts:
+
+| Contract | Benefits | Security and delivery cost |
+|----------|----------|----------------------------|
+| Explicit base-table publication | No second write model; lowest application change | Initial snapshot needs `SELECT` on published tables; schema additions and sensitive columns require strict review; joins and ledger interpretation move downstream |
+| Service-owned CDC projection/outbox table | Stable, PII-minimised stream contract; service keeps accounting semantics | Adds transactional writes/storage and service migrations; backfill and projection correctness become owned code |
+
+Use a base table only when the entire selected relation is safe for the CDC
+identity and its replica identity is stable. Use a service-owned projection or
+outbox for payment/provider data, address-bearing rows, or any relation where
+tool-side exclusion is the only thing hiding sensitive fields.
+
+PostgreSQL column lists remain useful for bandwidth and compatibility, but its
+own documentation says they are not a security boundary. PeerDB mappings and
+column exclusions are defence in depth, not the primary control. Never use
+`FOR ALL TABLES` or `FOR TABLES IN SCHEMA` for this workload.
+
+Candidate source controls:
+
+- one manually created, explicitly allowlisted publication per database;
+- one unique logical slot per mirror using built-in `pgoutput`;
+- stable primary key or suitable replica identity for every UPDATE/DELETE
+  table; `REPLICA IDENTITY FULL` only after measuring its WAL and lookup cost;
+- a dedicated login with `LOGIN`, `REPLICATION`, no ownership, no business
+  writes, and only the `SELECT` needed for initial snapshot;
+- platform-owned publication/slot DDL rather than granting the connector broad
+  database `CREATE` or table ownership; and
+- direct TLS `verify-full` access to the CNPG read-write Service, constrained by
+  HBA and NetworkPolicy, never through PgDog; and
+- an encrypted, private staging bucket with a dedicated identity, short
+  lifecycle, cleanup alert, and no access from analytics-service or browsers.
+
+`DatabaseRole` may reconcile the login and Secret when its v1 API is verified
+to represent the required attributes. Publications, replica identity, object
+grants, and ownership remain explicit database DDL; the role CR must not be
+described as an object-privilege controller.
+
+### Delivery and query correctness
+
+The reference transport is intentionally at-least-once at its failure
+boundaries. Retry safety belongs in the target model:
+
+1. Initial snapshot copies an allowlist into isolated raw tables.
+2. Each database independently catches up from its own slot and LSN.
+3. INSERT and UPDATE become versioned ClickHouse inserts.
+4. DELETE becomes a newer tombstone row; it is not an immediate physical
+   deletion.
+5. Raw tables retain `_peerdb_version`, `_peerdb_is_deleted`, and a sync time.
+6. Serving queries select the latest version per business key and then remove
+   tombstones. A plain aggregate over raw rows is always incorrect.
+7. Cross-database responses publish the minimum safe source watermark as
+   `data_through`; no document may claim a global order/payment/checkout LSN or
+   transaction.
+8. The existing bounded checksum/reconciliation process remains independent of
+   the transport and can rebuild a damaged partition.
+
+`ReplacingMergeTree` deduplication happens during background merges, so the API
+must continue using a benchmarked `argMax`/tombstone-aware serving projection
+or a normalized serving table. `FINAL` is a verification/tooling option unless
+the representative benchmark proves it meets the serving budget.
+
+### Schema-evolution protocol
+
+PostgreSQL does not publish DDL. PeerDB currently documents support for common
+schema changes, but that convenience cannot replace a compatibility protocol.
+
+| Source change | Required future treatment |
+|---------------|---------------------------|
+| Add nullable column | Add/validate target compatibility first, deploy producer, then opt the field into the mirror |
+| Drop column | Stop reading it in serving code, observe a compatibility window, then remove it from source and target |
+| Rename column | Treat as add + backfill + switch + drop; do not depend on automatic rename propagation |
+| Change type/nullability | Treat as breaking; pause or dual-write, migrate target, validate, then resume or resnapshot |
+| Change primary/replica key | Treat as breaking identity change and plan a new raw generation/resnapshot |
+| Add a table | Validate PII, key, initial snapshot cost, and target DDL before altering the publication |
+| Partition topology change | Test `publish_via_partition_root` and source/target key behavior explicitly |
+
+Every future service migration that changes a published contract must run a CDC
+compatibility test. When an event no longer fits target DDL, the safe behavior
+is to stop publication to the serving layer and alert; silently coercing unknown
+types to text is not acceptable for money or identifiers.
+
+### WAL, failover, and day-2 guardrails
+
+A stopped consumer does not stop PostgreSQL writes: its slot retains required
+WAL. PostgreSQL defaults `max_slot_wal_keep_size` to unlimited, which can turn a
+ClickHouse/PeerDB incident into source disk exhaustion. The future rollout must:
+
+- measure WAL bytes per hour under peak and large-transaction workloads;
+- set a finite cap from `peak WAL rate × tolerated outage + headroom`, while
+  reserving enough `pg_wal` capacity for the database itself;
+- document that exceeding the cap may invalidate the slot and requires a full
+  or scoped resnapshot;
+- alert on slot active state, retained bytes, retained time, restart LSN,
+  invalidation reason, source/destination/e2e lag, snapshot progress, mirror
+  errors, and PostgreSQL disk pressure; and
+- record source LSN/checkpoint and ClickHouse row/checksum evidence without
+  logging business payloads.
+
+Planned switchover is allowed only after each logical slot is observed on every
+eligible standby as synchronized, non-temporary, and without invalidation.
+Unplanned failover still requires the consumer to reconnect through the
+read-write Service. A successful pod restart is not proof: compare source
+mutations, consumed versions, duplicates, tombstones, and reconciliation
+checksums across the promotion boundary.
+
+### ADR promotion and adoption playbook
+
+When a trigger is proven, use this dossier to create one decision-shaped ADR,
+for example **“Adopt PeerDB for PostgreSQL-to-ClickHouse CDC”**, at `Proposed`
+and `Adoption: Not started`. Do not reserve the next ADR number now.
+
+Before the ADR can become `Accepted`:
+
+1. Revalidate the current PeerDB release, AGPL obligations, container/chart
+   provenance, supported PostgreSQL and ClickHouse versions, and open upgrade
+   or connector deprecations.
+2. Run a disposable prototype with synthetic data and no production Secret.
+3. Decide base-table versus service-owned projection per source relation and
+   complete a PII/provider-field audit.
+4. Benchmark initial snapshot, catch-up, steady-state load, WAL amplification,
+   staging-object growth/cleanup, ClickHouse query correctness, and resource
+   requests/limits.
+5. Prove CNPG planned switchover and forced failover, PeerDB restart, Temporal
+   interruption, ClickHouse outage, network partition, large transaction,
+   duplicate delivery, delete, and unsupported DDL behavior.
+6. Set the freshness SLO, recovery time, maximum retained WAL, resnapshot time,
+   and checksum acceptance bars from the prototype.
+7. Review the Flux dependency chain, namespace, External Secrets, HBA,
+   NetworkPolicy, PSS/Kyverno compliance, alerts, dashboards, and runbooks.
+
+After acceptance, adopt one mirror at a time:
+
+1. Apply target schema and least-privilege identities.
+2. Apply source projection, publication, replica identity, and slot.
+3. Start the initial snapshot with bounded parallelism.
+4. Catch up WAL and reconcile counts and money checksums.
+5. Dual-run CDC and batch through at least one scheduled reconciliation of the
+   complete 90-day query window, with independent result comparison.
+6. Switch the API read generation, not the transactional write path.
+7. Keep batch available through a declared rollback window.
+8. Retire batch only after freshness, correctness, failover, and rebuild SLOs
+   pass; update platform docs, runbooks, alerts, ADR Adoption, and RFC history.
+
+Rollback selects the last good batch-backed serving generation and stops the
+mirror. Drop a slot only after its checkpoint and rollback need are understood;
+an orphan slot is a disk risk, while an early drop destroys the resume point.
+
+### Required failure-oriented evidence
+
+| Exercise | Passing evidence before adoption |
+|----------|----------------------------------|
+| Initial snapshot under writes | Snapshot completes, WAL catches up, no missing/duplicate latest keys |
+| INSERT/UPDATE/DELETE | Latest-value query and tombstone filtering match PostgreSQL |
+| Large transaction | Bounded lag/memory; transaction is not partially published as complete business state |
+| PeerDB restart | Resumes from checkpoint and duplicate delivery remains query-safe |
+| ClickHouse outage | Source remains healthy within WAL budget; recovery drains backlog inside RTO |
+| Staging-store outage/leak | Mirror stops safely; retry and lifecycle cleanup work; bucket contains only approved columns |
+| CNPG switchover/failover | Consumer reconnects through read-write Service; checksum shows no gap |
+| Slot exceeds safety bound | Alert fires; documented resnapshot restores a correct generation |
+| Add/drop/rename/type change | Supported changes pass; unsupported changes stop safely and follow migration protocol |
+| Secret rotation | New connections use rotated credentials without losing the resume point |
+| PII inspection | Raw tables, logs, traces, and catalog contain no forbidden fields |
+| Batch comparison | KPI, funnel, product, count, and amount checksums agree for the same watermarks |
 
 ---
 
@@ -685,7 +978,10 @@ is the primary direction to test, not an already accepted architecture.
 | Browser → ClickHouse | Few backend lines | Exposes credentials and arbitrary-query surface; cannot satisfy current trust model |
 | Portal-specific `admin-api-service` | Matches the name of ADR-048's escape hatch | Couples the read model to one UI and makes reuse/ownership less clear |
 | Read-only `analytics-service` + 15-minute batch | Owns a reusable analytical model; isolates OLTP; explicit freshness and failure semantics | New service, sync job, schema, secrets, alerts, runbook, and cross-repo rollout |
-| PostgreSQL CDC → ClickHouse | Lower latency; captures updates/deletes as a stream | Slots, schema evolution, replay, and consumer operations are disproportionate to a 15-minute target |
+| Self-hosted PeerDB CDC | Purpose-built PostgreSQL → ClickHouse path; snapshot plus CDC; no Kafka requirement | Adds PeerDB workers/control plane, catalog, Temporal dependency, slots, WAL and schema-evolution operations; reference candidate only |
+| Debezium + Kafka/Redpanda + ClickHouse sink | Mature general-purpose change stream and reusable event backbone | Broker, Connect, topic/schema, sink, ordering and replay operations are disproportionate when analytics is the only consumer |
+| ClickHouse `MaterializedPostgreSQL` | Direct product-integrated replication with few components | Experimental/maturity and operational constraints make it unsuitable as the default production direction |
+| Custom `pgoutput` consumer | Full control and no general CDC control plane | Platform would own snapshot consistency, decoding, checkpointing, type mapping, retry, DDL, normalization and support indefinitely |
 | Refreshable materialized views | Atomic target replacement and complex scheduled joins | Scheduling/publication moves into ClickHouse while extraction still spans external DBs; cross-source failure boundary needs proof |
 | Incremental materialized views | Fast pre-aggregation | Trigger only sees newly inserted blocks, not later merges/updates in other joined sources; easy to double-count versioned facts |
 | Cards and tables only | No chart dependency | Trend and conversion shape become slow to scan; fails the primary analytical interaction |
@@ -698,8 +994,10 @@ evidence shows one of these repeatedly:
 
 - a sync cannot finish inside its 10-minute deadline twice in succession;
 - source export query p95 exceeds five seconds after indexing and bounding;
-- changed volume exceeds roughly five million rows per day; or
-- the product requires materially less than 15-minute freshness.
+- changed volume approaches roughly five million rows per day;
+- the product requires freshness below five minutes;
+- a hard-delete stream becomes a correctness requirement; or
+- repeated incremental scans measurably disturb a CNPG primary or replica.
 
 These are review triggers, not automatic migrations.
 
@@ -727,6 +1025,8 @@ These are review triggers, not automatic migrations.
       the current React 19/Vite stack.
 - [ ] Decide whether the future API returns one overview document or separates
       trend/funnel/products after measuring payload and independent failure needs.
+- [x] Defer CDC until a measured scale/freshness/correctness trigger; retain the
+      ADR-ready adoption dossier with PeerDB as a revalidated reference candidate.
 - [ ] Owner sign-off: **ready for RFC**.
 
 ---
@@ -765,6 +1065,22 @@ They give each domain an explicit, versioned place to define safe export
 columns and semantics. A broad table grant would silently expand when schemas
 change.
 
+**Why is CDC not part of the first slice?**
+
+The requested freshness is 15 minutes, while the bounded batch already has a
+completed-publication boundary, overlap repair, and checksums. CDC would replace
+that simple transport with three database-local slots plus WAL, snapshot,
+failover, schema-evolution, and consumer operations without changing the first
+product outcome.
+
+**Does future CDC require a PostgreSQL extension?**
+
+No. PostgreSQL includes `pgoutput`, and the product cluster already uses
+`wal_level=logical`. Future CDC requires publications, logical slots, replica
+identity, permissions, capacity, and operational guardrails. `wal2json` is only
+needed for consumers that deliberately choose its JSON output format; the
+PeerDB and Debezium reference paths can use `pgoutput`.
+
 **Why no customer cohorts?**
 
 They require a customer analytical identity and privacy/retention model. The
@@ -789,6 +1105,23 @@ access to every dataset and operation.
 - [ClickHouse insert strategy](https://clickhouse.com/docs/best-practices/selecting-an-insert-strategy)
 - [ClickHouse refreshable materialized views](https://clickhouse.com/docs/concepts/features/materialized-views/refreshable-materialized-view)
 - [ClickHouse incremental materialized views](https://clickhouse.com/docs/concepts/features/materialized-views)
+- [ClickHouse MaterializedPostgreSQL database engine](https://clickhouse.com/docs/reference/engines/database-engines/materialized-postgresql)
+- [ClickHouse PostgreSQL + ClickHouse open-source stack](https://clickhouse.com/blog/postgres-clickhouse-oss)
+- [PeerDB PostgreSQL → ClickHouse CDC setup](https://docs.peerdb.io/mirror/cdc-pg-clickhouse)
+- [PeerDB ClickHouse data-modeling guidance](https://docs.peerdb.io/bestpractices/clickhouse_datamodeling)
+- [PeerDB self-hosted Kubernetes architecture](https://github.com/PeerDB-io/peerdb-enterprise)
+- [PeerDB production Helm guidance](https://github.com/PeerDB-io/peerdb-enterprise/blob/main/PRODUCTION.md)
+- [PeerDB source, architecture, connector status, and license](https://github.com/PeerDB-io/peerdb)
+- [PeerDB releases](https://github.com/PeerDB-io/peerdb/releases)
+- [Debezium PostgreSQL connector](https://debezium.io/documentation/reference/stable/connectors/postgresql.html)
+- [PostgreSQL 18 publications and replica identity](https://www.postgresql.org/docs/18/logical-replication-publication.html)
+- [PostgreSQL 18 column-list security warning](https://www.postgresql.org/docs/18/logical-replication-col-lists.html)
+- [PostgreSQL 18 logical replication restrictions](https://www.postgresql.org/docs/18/logical-replication-restrictions.html)
+- [PostgreSQL 18 logical replication security](https://www.postgresql.org/docs/18/logical-replication-security.html)
+- [PostgreSQL 18 replication-slot and WAL settings](https://www.postgresql.org/docs/18/runtime-config-replication.html)
+- [PostgreSQL 18 logical replication failover](https://www.postgresql.org/docs/18/logical-replication-failover.html)
+- [PostgreSQL 18 replication-slot status](https://www.postgresql.org/docs/18/view-pg-replication-slots.html)
+- [CloudNativePG replication and logical slot synchronization](https://cloudnative-pg.io/docs/devel/replication/)
 - [Altinity operator security hardening](https://github.com/Altinity/clickhouse-operator/blob/master/docs/security_hardening.md)
 - [CloudNativePG 1.30 declarative role management](https://cloudnative-pg.io/docs/1.30/declarative_role_management/)
 - [Recharts API](https://recharts.github.io/en-US/api/)
@@ -838,6 +1171,16 @@ actual Context7 query is captured and any correction is applied.
 | CHI secret-backed users and grant rendering | Altinity operator 0.27.3 | pending Context7 |
 | DatabaseRole is namespace-scoped and reconciles on spec/Secret change | CNPG 1.30 role docs | pending Context7 |
 | DatabaseRole does not own PostgreSQL object grants | CNPG 1.30 API/docs | pending Context7 |
+| Publications are database-local and cannot publish views | PostgreSQL 18 logical replication docs | pending Context7 |
+| Publication column lists are not a security boundary | PostgreSQL 18 column-list/security docs | pending Context7 |
+| Logical slots can retain unbounded WAL unless capped | PostgreSQL 18 settings + CNPG replication docs | pending Context7 |
+| CNPG synchronizes logical decoding slots across failover candidates | CNPG 1.30/development replication docs | pending Context7 + failover prototype |
+| PeerDB initial snapshot, WAL mirrors, version columns, and tombstones | PeerDB current mirror/data-modeling docs | pending Context7 + prototype |
+| PeerDB Kubernetes deployment needs workers, catalog, API, and Temporal | PeerDB self-hosted Helm docs | pending Context7 + chart audit |
+| PeerDB ClickHouse ingestion requires object storage staging and cleanup controls | PeerDB source/deployment docs | pending Context7 + prototype |
+| PeerDB compatibility, license, release, and schema-change behavior | PeerDB current release/source docs | pending Context7 + adoption-time revalidation |
+| Debezium can use built-in `pgoutput` but requires a distinct slot per connector | Debezium stable PostgreSQL connector docs | pending Context7 |
+| MaterializedPostgreSQL is experimental and does not replicate DDL | ClickHouse 26.7 engine docs | pending Context7 |
 | Search params remain URL-owned in the existing frontend stack | TanStack Router current docs | pending Context7 |
 | Query cancellation consumes AbortSignal | TanStack Query current docs | pending Context7 |
 | Recharts accessibility and React 19 support | Recharts current docs/package peer range | pending Context7 |
@@ -852,7 +1195,7 @@ actual Context7 query is captured and any correction is applied.
 - [x] Platform as-built section is grounded in manifests, trusted API docs, and source migrations
 - [x] Primary candidate is stated without declaring an architecture decision accepted
 - [ ] Context7 audit complete; every pending row confirmed/corrected/rejected
-- [x] Four Mermaid diagrams distinguish deployed from reference components
+- [x] Five Mermaid diagrams distinguish deployed from reference components
 - [x] No Kubernetes manifest or application implementation is included
 - [x] No customer PII or payment credential is proposed for export
 - [ ] `argMax`/`FINAL` serving choice benchmarked against a representative 90-day dataset
