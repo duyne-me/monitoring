@@ -5,7 +5,7 @@
 | **Severity** | warning |
 | **Category** | workflow |
 | **Source** | `kubernetes/infra/configs/temporal/prometheusrule.yaml` |
-| **Metrics** | `persistence_error_with_type`, `persistence_requests` — Temporal **server** metrics |
+| **Metrics** | `persistence_error_with_type` (excluding `serviceerror_*NotFound`), `persistence_requests` — Temporal **server** metrics |
 | **Status** | active |
 | **Dashboard** | Temporal → Server · Temporal Web (`temporal.duynh.me`) |
 | **Local-stack** | present — the compose stack runs Temporal on Postgres too |
@@ -13,7 +13,7 @@
 ## Meaning
 
 ```promql
-sum(rate(persistence_error_with_type[5m]))
+sum(rate(persistence_error_with_type{error_type!~"serviceerror_.*NotFound"}[5m]))
   / clamp_min(sum(rate(persistence_requests[5m])), 1) > 0.02
 ```
 
@@ -48,6 +48,11 @@ sum(rate(persistence_latency_sum[5m])) / sum(rate(persistence_latency_count[5m])
 
 # Break the errors down by operation
 topk(10, sum by (operation, error_type) (rate(persistence_error_with_type[5m])))
+# ^ deliberately UNFILTERED: run this one first. If the top rows are
+#   serviceerror_NotFound on GetCurrentExecution or GetTaskQueueUserData, that is
+#   Temporal control flow -- a lookup that legitimately missed -- and the alert
+#   should not have fired. Those two types are excluded from the alert since
+#   2026-09-06; anything else here is a real persistence problem.
 ```
 
 ```bash
