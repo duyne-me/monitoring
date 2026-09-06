@@ -58,9 +58,27 @@ spec:
             summary: "Temporal service error rate high (>5%)"
             description: "Temporal frontend/service error ratio has exceeded 5% for >10m — RPCs into the cluster are failing; check the history/matching/frontend services and persistence."
 
+        # NotFound is control flow, not failure. The server asks persistence
+        # "does this execution exist?" before starting one, and "does this task
+        # queue have user data?" on every poll; a miss answers NotFound and the
+        # caller proceeds normally. Both land in persistence_error_with_type, so
+        # the unfiltered ratio measures how often Temporal looked something up and
+        # it was not there.
+        #
+        # Measured on the cluster 2026-09-06 while this alert was firing: 535
+        # NotFound events in 30 minutes across GetCurrentExecution (history) and
+        # GetTaskQueueUserData (matching), giving 0.02592 against the 0.02
+        # threshold. Excluding the two not-found types the same instant reads
+        # **0.0**. It had been firing since a routine worker-version rollover --
+        # exactly the moment a lookup for a version the server has not registered
+        # yet is guaranteed to miss.
+        #
+        # serviceerror_Unavailable and persistence_CurrentWorkflowConditionFailedError
+        # stay IN the numerator: the first is a real persistence failure, the
+        # second is write contention worth seeing.
         - alert: TemporalPersistenceErrorRateHigh
           expr: |
-            sum(rate(persistence_error_with_type[5m])) / clamp_min(sum(rate(persistence_requests[5m])), 1) > 0.02
+            sum(rate(persistence_error_with_type{error_type!~"serviceerror_.*NotFound"}[5m])) / clamp_min(sum(rate(persistence_requests[5m])), 1) > 0.02
           for: 10m
           labels:
             severity: warning
