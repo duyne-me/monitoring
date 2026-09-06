@@ -131,7 +131,7 @@ spec:
               # The operator's built-in default image floats on `latest`, which
               # the no-latest policy forbids and which would drift the quorum
               # version on every pod recreate. Pinned to the server's line.
-              image: clickhouse/clickhouse-keeper:26.7
+              image: clickhouse/clickhouse-keeper:26.8
               securityContext:
                 allowPrivilegeEscalation: false
                 runAsNonRoot: true
