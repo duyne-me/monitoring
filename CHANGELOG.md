@@ -519,6 +519,27 @@ Skeleton (copy what you need):
 
 #### Docs
 
+- **414 lines of planning notes removed from the dashboard reference.** The page
+  the docs index calls the *complete* SRE/DevOps dashboard reference ended in a
+  `## Grafana Annotations (Planned Feature)` appendix: a five-phase implementation
+  plan, written in **Vietnamese** inside an English-only tree, embedding a
+  **third-party blog link**, dated `2025-01-19` — a year adrift from everything
+  around it — and closing by proposing a `docs/GRAFANA_ANNOTATIONS.md` that was
+  never created. The feature was never built either: `/api/annotations` returns
+  `[]` and no Grafana manifest configures one. A plan belongs in
+  `docs/proposals/`, not in a reference page. Nothing describing the live board
+  changed.
+  Two index descriptions were drifting with it: `docs/README.md` and
+  `docs/observability/README.md` advertised "40 panels, 6 rows" while the
+  document's own header says **8 rows (~41 panels)** since RFC-0017 W3/W4.
+  **Checked and deliberately left alone:** the 17 `*.yaml.bak` files are not rot —
+  `kubernetes/infra/README.md` documents renaming to `.bak` as *the* retirement
+  convention, "tracked in git (deliberately)", and about ten kustomization headers
+  explain the individual files; the alert-catalog count even depends on the two
+  alerts inside `tempo-alerts.yaml.bak`. `kong-gateway.md` is properly archived
+  with a banner and labelled "Archived" in every index. The commented-out
+  `mcp.yaml`, `pss-restricted-apps.yaml` and the two gated CNPG topology rules all
+  carry dated owner decisions or re-enable conditions in their headers.
 - **ADR-055's stated reason for choosing KEDA was the opposite of what this
   cluster measures.** The `sources/helm/keda.yaml` header claimed the Temporal API
   is "the only backlog signal a self-hosted server offers per worker version" and
