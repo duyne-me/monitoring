@@ -267,6 +267,45 @@ validate_worker_versioning() {
 # definition asynchronously, so the Job "verified" 2 of 2 on a 3-replica store
 # and went green (RFC-0028). Duplicating the intent is the safer trade, provided
 # nothing lets the two drift. This is that guard.
+# The CHI carries raw XML inside `spec.configuration.files`, and NOTHING else in
+# this repo looks at it. kustomize sees a YAML string; kubeconform sees a string;
+# the CRD schema sees a string. ClickHouse is the first thing to parse it, at
+# startup, and it does not degrade -- a malformed file is
+# `SAXParseException: Invalid token`, the server refuses to boot, and the operator
+# rolls it into CrashLoopBackOff one replica at a time.
+#
+# Measured 2026-09-06, the hard way: an em-dash written as `--` inside an XML
+# comment. XML forbids `--` in a comment. `make validate` passed, the sync went
+# out, and chi-clickhouse-otel-0-0-0 crash-looped until the file was fixed. This
+# check is four lines and would have caught it before the push.
+validate_clickhouse_embedded_xml() {
+  echo "INFO - Validating XML embedded in the ClickHouseInstallation"
+  local chi="kubernetes/infra/configs/clickhouse/clickhouseinstallation.yaml"
+  if [[ ! -f "$chi" ]]; then
+    echo "  SKIP - CHI manifest not found"
+    return 0
+  fi
+  local names
+  names=$(yq e '.spec.configuration.files | keys | .[]' "$chi" 2>/dev/null)
+  if [[ -z "$names" ]]; then
+    echo "  SKIP - no configuration.files on the CHI"
+    return 0
+  fi
+  local f
+  for f in $names; do
+    if ! yq e ".spec.configuration.files.\"${f}\"" "$chi" \
+         | python3 -c 'import sys,xml.dom.minidom; xml.dom.minidom.parseString(sys.stdin.read())' 2>/dev/null; then
+      echo "ERROR - ${chi}: configuration.files[\"${f}\"] is not well-formed XML." >&2
+      echo "        ClickHouse refuses to start on a malformed config file, so this" >&2
+      echo "        would crash-loop every replica. Common cause: \`--\` inside an" >&2
+      echo "        XML comment, which XML forbids -- keep prose in YAML comments" >&2
+      echo "        above the block instead." >&2
+      exit 1
+    fi
+    echo "  ${f} parses"
+  done
+}
+
 validate_clickhouse_replica_count() {
   echo "INFO - Validating ClickHouse replica count agreement"
   local chi="kubernetes/infra/configs/clickhouse/clickhouseinstallation.yaml"
@@ -324,6 +363,7 @@ validate_standalone_manifests
 validate_kustomize_overlays
 validate_worker_versioning
 validate_kyverno_policies
+validate_clickhouse_embedded_xml
 validate_clickhouse_replica_count
 validate_production
 echo "INFO - All validations passed"

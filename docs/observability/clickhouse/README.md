@@ -228,9 +228,10 @@ different places — two of which this platform does not own.
 
 | `system.*` table | Partition | TTL | Owner of the TTL |
 |---|---|---|---|
-| `query_log`, `part_log`, `trace_log` | daily (`event_date`) | 30 d | Altinity operator, via `config.d/01-clickhouse-0{3,4,5}-*.xml` |
+| `query_log`, `part_log` | daily (`event_date`) | 30 d | Altinity operator, via `config.d/01-clickhouse-0{3,4}-*.xml` |
+| `trace_log` | daily (`event_date`) | **7 d** | operator sets 30 d; **this repo overrides it** — `02-` loads after `01-`, see below |
 | `processors_profile_log`, `aggregated_zookeeper_log`, `zookeeper_connection_log` | monthly | 30 d | ClickHouse upstream default |
-| `metric_log`, `asynchronous_metric_log`, `text_log`, `error_log`, `background_schedule_pool_log` | **daily** | **7 d** | **this repo** — `configuration.files` on the `ClickHouseInstallation` |
+| `metric_log`, `asynchronous_metric_log`, `text_log`, `error_log`, `background_schedule_pool_log`, `query_views_log` | **daily** | **7 d** | **this repo** — `configuration.files` on the `ClickHouseInstallation` |
 
 Before the last row existed, those five had **no expiry at all** and grew for the
 life of the cluster: ~59 % of all system-log bytes at 46 minutes uptime.
@@ -240,6 +241,42 @@ when idle. `system.*` tables are ordinary local `MergeTree`, not replicated, so
 that growth is **per replica**, on each node's own filesystem.
 
 `query_thread_log` is absent by design — the same operator config removes it.
+
+##### `trace_log`: the biggest table, and it is not query traffic
+
+Measured on a 14-hour-old cluster (2026-09-06): **6.3 million rows, 145 MiB**, the
+largest `system.*` table by a wide margin and still climbing at roughly 1.2 M
+rows/hour. At the operator's 30-day TTL that projects to **7.3 GiB per replica**,
+22 GiB across the three — and `system.*` tables are local, not replicated, so each
+node pays in full. Nothing would have stopped it: the PVCs are 10 Gi but
+local-path enforces no quota, so `df` inside the pod reports the *node* filesystem
+(299 GiB free here) and ClickHouse sizes itself against that.
+
+The surprise is the source. `query_log` recorded **2–40 queries** in the same
+hours, so this is not query profiling. In a 10-minute sample:
+
+| `trace_type` | rows |
+|---|---|
+| `Memory` | 89,082 |
+| `MemoryPeak` | 89,032 |
+| `Real` | 9,675 |
+| `CPU` | 388 |
+
+**95 % is the memory profiler**, which samples a stack every
+`memory_profiler_step` (4 MiB) of allocation by *any* thread — merges and inserts
+included. An idle ClickHouse still allocates constantly, so the table grows
+whether or not anyone queries it.
+
+This repo therefore overrides the operator and sets `trace_log` to **7 days**
+(≈1.7 GiB per replica). Disabling the profiler was the alternative and was
+rejected: this cluster runs a 1.12 GiB self-cap that has already refused ad-hoc
+admin queries, so memory samples are worth keeping — just not for a month. The
+override works because `config.d` loads lexicographically and this repo's file is
+`02-system-log-retention.xml` against the operator's
+`01-clickhouse-05-trace_log.xml`; everything but the TTL is copied verbatim,
+including `ORDER BY event_time`. **The cost of that override:** a future operator
+change to its own `trace_log` template is silently ignored here, so re-read that
+file on operator bumps.
 
 **Why the partition key moves with the TTL.** All five shipped monthly
 (`toYYYYMM`). A 7-day TTL on a monthly partition is the misaligned case in
@@ -253,25 +290,86 @@ three tables.
 > system log table **lazily**, on its first write, so a freshly built cluster
 > shows fewer of them than one that has been running for days —
 > `query_views_log`, `asynchronous_insert_log` and `blob_storage_log` all arrive
-> later, carrying upstream defaults. What is stable is the shape: which tables
-> the operator manages, which upstream manages, and which this repo manages.
+> later. What is stable is the shape: which tables the operator manages, which
+> upstream manages, and which this repo manages.
+>
+> **That warning was right and still not enough** (2026-09-06). It said the late
+> arrivals carry "upstream defaults", which quietly assumes a default *exists*.
+> For `asynchronous_insert_log` (3 d) and `blob_storage_log` (30 d) it does. For
+> **`query_views_log` it does not** — upstream ships that one with no TTL at all,
+> and on this platform it is written by our own materialized view
+> (`otel.otel_traces_trace_id_ts_mv`), one row per trace-insert batch, so it grows
+> with ingestion for the life of the cluster. It is now the sixth table in the
+> repo-owned row above. The lesson generalises past ClickHouse: **an audit that
+> enumerates what exists cannot see what has not been created yet.** Enumerate
+> the declaration, not the instance.
 
 ```sql
--- the audit, re-run: which engine log tables have an expiry, and on what grain
+-- (1) what EXISTS, with the real retention rather than a yes/no. Extract the
+--     number: a presence check cannot tell 7 d from the operator's 30 d, and
+--     reading "has TTL" as "ours" is how the sixth table stayed missing.
 SELECT name, partition_key,
-       if(position(create_table_query, 'TTL event_date + toIntervalDay') = 0,
-          'NONE', 'has TTL') AS ttl
+       extractAll(create_table_query, 'toIntervalDay\\((\\d+)\\)')[1] AS ttl_days,
+       formatReadableSize(total_bytes) AS size
 FROM system.tables
-WHERE database = 'system' AND engine = 'MergeTree'
-ORDER BY ttl, name;
+WHERE database = 'system' AND engine LIKE '%MergeTree'
+ORDER BY total_bytes DESC;
 ```
+
+```bash
+# (2) what is DECLARED — the authoritative list, including tables not yet born.
+#     Diff this against (1): anything declared, absent, and without a TTL in the
+#     effective config is a table that will arrive unbounded.
+kubectl exec -n monitoring chi-clickhouse-otel-0-0-0 -c clickhouse -- \
+  sh -c "grep -oE '<[a-z_]+_log>' /etc/clickhouse-server/config.xml | tr -d '<>' | sort -u"
+```
+
+Measured 2026-09-06: **24 declared, 13 born.** Of the eleven not yet created,
+`crash_log` is deliberately left alone — a crash record is the last thing to
+expire — and the rest (`backup_log`, `session_log`, `opentelemetry_span_log`,
+`query_metric_log`, the lake-format logs, `instrumentation_trace_log`) belong to
+features this platform does not use. Revisit this list when one of them appears.
 
 **Do not shorten that predicate.** Neither `'TTL'` nor `' TTL '` works:
 `metric_log` has ~1,900 columns and one of their *comments* reads `"... TTL
 remove requests successfully enqueued"`, so both forms report a TTL the table
 does not have. Match the clause, or read what follows `ORDER BY`.
 
+##### Writing this config: XML forbids `--` inside a comment
+
+Learned by crash-looping the cluster on 2026-09-06. `spec.configuration.files`
+carries raw XML inside a YAML string, and **nothing in the repo parsed it**:
+kustomize, kubeconform and the CRD schema all see a string. ClickHouse is the
+first reader, at startup, and it does not degrade — a malformed file is
+`SAXParseException: Invalid token`, the server refuses to boot, and the operator
+walks that into `CrashLoopBackOff` one replica at a time.
+
+The trigger was an em-dash typed as `--` inside an `<!-- … -->` block, which XML
+does not allow. `make validate` passed and the sync went out.
+
+Two things came out of it. Keep explanatory prose in the **YAML** comments above
+`files:`, where the existing block already lives, and leave the XML minimal. And
+`scripts/flux-validate.sh` now parses every entry in `configuration.files`, so the
+same mistake fails locally instead of on the cluster.
+
 ##### After changing a system table's engine: drop the `_0` leftovers
+
+Observed end to end on 2026-09-06, when `trace_log` and `query_views_log` were
+added to the block. The rename is **per replica and per table, at that table's
+first write after the config change**, so the two behaved completely differently
+on the same cluster at the same moment:
+
+| Replica | `trace_log` | `query_views_log` |
+|---|---|---|
+| 0 | renamed at once — `trace_log_0` (147.9 MiB, 30 d) beside a fresh 7 d table | not renamed yet |
+| 1 | renamed — `trace_log_0` (140.3 MiB) | renamed — `query_views_log_0` (190 KiB) |
+| 2 | renamed — `trace_log_0` (113.1 MiB) | not renamed yet |
+
+`trace_log` flipped instantly on every replica because the memory profiler writes
+to it constantly; `query_views_log` only flipped where a materialized-view insert
+happened to land. **A cleanup pass straight after the apply will therefore miss
+tables**, which is why this is a step to repeat rather than a one-shot. Dropping
+all four leftovers reclaimed **401 MiB** across the three replicas.
 
 Changing the engine definition does **not** ALTER the table. ClickHouse renames
 the old one to `<name>_0` and creates a fresh one; the renamed copy keeps every

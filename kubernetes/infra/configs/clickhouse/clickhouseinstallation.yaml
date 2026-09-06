@@ -82,7 +82,8 @@ spec:
       prometheus/events: "true"
       prometheus/asynchronous_metrics: "true"
       prometheus/errors: "true"
-    # Retention for the engine's OWN log tables. Until this landed the repo
+    # Retention for the engine's OWN log tables (SIX of them; query_views_log
+    # joined 2026-09-06). Until this landed the repo
     # configured none, and what TTL existed came from two places we do not own:
     # ClickHouse upstream defaults, and three files the Altinity operator injects
     # (config.d/01-clickhouse-0{3,4,5}-*.xml, giving query_log / part_log /
@@ -110,6 +111,40 @@ spec:
     # come up with PARTITION BY event_date, TTL 7d, their original sorting key
     # (asynchronous_metric_log keeps `metric, event_date, event_time`), and their
     # collect_interval / level / duration_threshold intact.
+    #
+    # 2026-09-06, after auditing a 14-hour-old cluster instead of a fresh one, two
+    # more tables joined. Note the prose stays HERE, in YAML: XML forbids `--`
+    # inside a comment, and an em-dash in an XML comment inside this string
+    # crash-loops the server with `SAXParseException: Invalid token`. `make
+    # validate` cannot catch it -- it checks the YAML, not the XML embedded in it.
+    #
+    # query_views_log is the SIXTH table with no expiry, and it was missed the
+    # first time for a reason worth keeping: system log tables are created LAZILY,
+    # on first write, and this one is only born when a materialized view runs.
+    # There is exactly one on this platform, otel.otel_traces_trace_id_ts_mv, and
+    # every row in the table names it -- so it grows with our own trace ingestion,
+    # one row per insert batch. An audit that enumerates `system.tables` cannot see
+    # a table that has not been born; enumerate the server's declared <*_log>
+    # sections instead (24 declared, 13 born). Upstream ships no TTL for this one,
+    # unlike asynchronous_insert_log (3 d) or blob_storage_log (30 d). Its only
+    # non-default setting is the 7500 ms flush, read off the live config.
+    #
+    # trace_log is the OPERATOR's table, overridden here for one reason: size.
+    # Measured at 14 hours: 6.3 M rows, 145 MiB, the largest system.* table,
+    # projecting to 7.3 GiB PER REPLICA at the operator's 30 days = 22 GiB across
+    # three, against 10 Gi PVCs that local-path does not enforce. It is not query
+    # traffic: query_log saw 2-40 queries in those hours while 95% of trace_log
+    # samples were Memory/MemoryPeak, the memory profiler firing every 4 MiB of
+    # allocation by any thread, merges included. Seven days rather than disabling
+    # the profiler, because this cluster runs a 1.12 GiB self-cap that has already
+    # refused ad-hoc admin queries, so the samples are worth a week. Everything but
+    # the TTL is copied from the operator verbatim, INCLUDING `ORDER BY event_time`
+    # rather than this file's usual (event_date, event_time): changing a sorting
+    # key is a different decision than changing an expiry. The override works
+    # because config.d loads lexicographically and this file is `02-` against the
+    # operator's `01-clickhouse-05-trace_log.xml`. COST: a future operator change
+    # to its own trace_log template is silently ignored here, so re-read that file
+    # on operator bumps.
     #
     # ONE MANUAL STEP REMAINS -- see docs/observability/clickhouse/README.md
     # "The engine's own log tables". Changing a system table's engine definition
@@ -155,6 +190,18 @@ spec:
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
                 <duration_threshold_milliseconds>30</duration_threshold_milliseconds>
             </background_schedule_pool_log>
+            <query_views_log replace="1">
+                <database>system</database>
+                <table>query_views_log</table>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+            </query_views_log>
+            <trace_log replace="1">
+                <database>system</database>
+                <table>trace_log</table>
+                <engine>Engine = MergeTree PARTITION BY event_date ORDER BY event_time TTL event_date + INTERVAL 7 DAY</engine>
+                <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+            </trace_log>
         </clickhouse>
     clusters:
       - name: otel
