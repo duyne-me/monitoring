@@ -382,6 +382,33 @@ Skeleton (copy what you need):
   an XML comment, which XML forbids, crash-looped `chi-clickhouse-otel-0-0-0`
   while `make validate` reported success. The check is a few lines, fails locally
   with the cause named, and was negative-tested against the exact defect.
+- **One core alert could never fire, and one fired on normal control flow.** Found
+  by auditing a **14-hour-old** cluster: every metric name referenced by an
+  alerting rule was extracted and diffed against the `__name__` values the TSDB
+  actually holds.
+  **`KubeDeploymentReplicasMismatch`** compared `kube_deployment_spec_replicas`
+  against `kube_deployment_status_ready_replicas`. kube-state-metrics publishes
+  `kube_deployment_status_replicas_ready` — the last two words transposed — so the
+  right side of the `!=` was an empty vector on every evaluation since the rule was
+  written, while vmalert reported `health=ok`, because a binary operator with an
+  empty side is a valid query and simply never a true one. 0 series for the name
+  used, 71 for the real one. The sibling `KubeStatefulSetReplicasMismatch` four
+  lines below had it right, which is the cheapest proof there was. Fixed and
+  **positive-tested**: with a real mismatch created on purpose, the expression
+  matched within one KSM scrape and returned the affected Deployment; it had
+  returned nothing for the life of the rule.
+  **`TemporalPersistenceErrorRateHigh`** had the opposite defect — firing, but on
+  nothing. `serviceerror_NotFound` is how Temporal asks persistence whether an
+  execution exists before starting one, and whether a task queue has user data;
+  a miss is the normal answer. 535 such events in 30 minutes across
+  `GetCurrentExecution` and `GetTaskQueueUserData` put the ratio at **0.02592**
+  against a 0.02 threshold, while the same instant excluding not-found types read
+  **0.0**. The numerator now excludes `serviceerror_*NotFound` and keeps
+  `serviceerror_Unavailable` and `CurrentWorkflowConditionFailedError`, which are
+  real. It went quiet on apply.
+  **`DBClientErrorRate`** is marked 💤: twelve `db_client_*` metrics exist, so the
+  RFC-0017 W4 instrumentation is live — it just never emits an error counter. It
+  had been listed as active.
 - **`Edge429RatioHigh` could never fire, and nothing said so.** Its recording
   rule `edge:rq_429_ratio:rate5m` named
   `envoy_http_local_rate_limiter_http_local_rate_limit_rate_limited`, a series

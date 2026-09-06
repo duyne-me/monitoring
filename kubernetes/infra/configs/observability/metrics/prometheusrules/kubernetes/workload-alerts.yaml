@@ -13,10 +13,19 @@ spec:
     - name: kubernetes-workload-health
       interval: 1m
       rules:
+        # `kube_deployment_status_replicas_ready`, NOT `..._status_ready_replicas`.
+        # The two words were transposed, and kube-state-metrics publishes no series
+        # under the wrong name, so this rule compared against an empty vector and
+        # returned nothing on every evaluation since it was written. vmalert
+        # reported `health=ok` throughout -- a binary operator with an empty right
+        # side is a valid query, just never a true one. Caught 2026-09-06 by diffing
+        # every metric name referenced by an alert against `__name__` values in the
+        # TSDB: 0 series for the name used here, 71 for the real one. The sibling
+        # rule below had it right all along, which is the cheapest available proof.
         - alert: KubeDeploymentReplicasMismatch
           expr: |
             kube_deployment_spec_replicas
-            != kube_deployment_status_ready_replicas
+            != kube_deployment_status_replicas_ready
           for: 15m
           labels:
             severity: warning
