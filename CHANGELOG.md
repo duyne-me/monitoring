@@ -336,6 +336,13 @@ Skeleton (copy what you need):
   `materialized-views.md` (incremental `TO` trace-id table). The hub README
   stays platform + Grafana + alerts + playground.
 
+#### Proposals
+
+- **RFC-0030 research opens the Backoffice commerce-analytics design.** It
+  defines ledger-owned money semantics, cohort funnel rules, completed-batch
+  visibility, a read-only analytics boundary, and an Admin Portal-native page;
+  Context7 and serving-query benchmark gates remain open before an RFC exists.
+
 ### Bugfix
 
 #### Observability
