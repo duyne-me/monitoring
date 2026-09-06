@@ -31,7 +31,7 @@
 13. [Security and authorization](#security-and-authorization)
 14. [Failure model and operations](#failure-model-and-operations)
 15. [Alternatives](#alternatives)
-16. [Open questions](#open-questions)
+16. [Remaining validation](#remaining-validation)
 17. [FAQ](#faq)
 18. [References](#references)
 19. [Context7 audit log](#context7-audit-log)
@@ -94,8 +94,9 @@ inventing implementation policy:
    agreeing what the numbers mean.
 2. Read [Core mechanism](#core-mechanism) for the candidate consistency model.
 3. Compare it with reality in [vs platform as-built](#vs-platform-as-built).
-4. Use [Alternatives](#alternatives) and [Open questions](#open-questions) for
-   the decisions that must be reviewed before an RFC is authored.
+4. Use [Alternatives](#alternatives) and
+   [Remaining validation](#remaining-validation) for the evidence still needed
+   before an RFC is authored.
 
 ---
 
@@ -220,32 +221,39 @@ candidate therefore treats `sync_runs` as a publication ledger:
 2. Read each database in a read-only transaction and record its source cut-off.
 3. Insert facts tagged with the batch sequence in meaningful batches.
 4. Mark the run `complete` only after all sources and inserts succeed.
-5. Query facts only where `batch_seq` is no newer than the latest complete run.
+5. Query facts only when their `batch_seq` joins to a `complete` run no newer
+   than the current visibility cut-off.
 
 Those source transactions are independent; this is not a distributed
 point-in-time snapshot. The response's `data_through` is therefore the minimum
 of the completed run's source cut-offs. It must never advertise the newest
 individual watermark as though every source had reached it.
 
-A failed attempt can leave physical rows in ClickHouse; those rows are not
-logical data until a completed cut-off admits them. Retry overlap is expected,
-so query correctness cannot depend on background merges having happened.
+A failed attempt can leave physical rows in ClickHouse; those rows never become
+logical data merely because a later sequence completes. Every serving query
+excludes sequences whose own `sync_runs` row is not `complete`. Retry overlap is
+expected, so query correctness cannot depend on background merges having
+happened.
 
 ### Incremental and reconciliation cycle
 
 - Initial load: the bounded history window, currently 90 days.
 - Every 15 minutes: select rows newer than the last completed source watermark,
   with a one-hour overlap to absorb clock edges and retry races.
-- Nightly: re-read the bounded retention window to repair missed late changes.
+- Nightly: re-read and repair the latest seven days to catch late state changes
+  without repeatedly scanning the full product window.
+- Weekly: compare source and ClickHouse checksums across the full 90-day window;
+  re-read only mismatched slices.
 - Watermarks advance only with the completed batch.
-- User queries filter to at most 90 days. A possible 100-day physical TTL is
-  evaluated as reconciliation headroom, not exposed as product history.
+- User queries filter to at most 90 days. ClickHouse keeps 100 physical days so
+  TTL merge timing and the weekly repair have ten days of operational headroom;
+  the extra days are never exposed as product history.
 
 `ReplacingMergeTree` removes equal sorting keys during asynchronous merges; it
 does not create an immediate uniqueness constraint. Candidate queries must use
-`argMax` over a source version plus batch sequence (or a measured equivalent)
-instead of assuming a merged table. `FINAL` remains an option to benchmark, not
-the unexplained default for every request.
+`argMax` over a source version plus batch sequence instead of assuming a merged
+table. `FINAL` is reserved for verification and operator diagnosis; it is not
+used on the request path.
 
 ---
 
@@ -314,7 +322,8 @@ September 3 cohort.
 
 Batch 104 loads order and checkout rows, then payment extraction fails. Batch
 103 remains the latest complete batch, so the API returns batch 103 with a stale
-age. Rows tagged 104 cannot leak into any KPI. The next attempt starts from the
+age. Rows tagged 104 cannot leak into any KPI, including after a later batch 105
+completes, because 104 itself is not complete. The next attempt starts from the
 watermarks of 103 and may insert duplicate physical versions; entity-level
 deduplication produces one logical result.
 
@@ -374,6 +383,7 @@ research needs a concrete shape to test whether one request can render the page:
     "data_through": "2026-09-01T00:15:00Z",
     "stale": false
   },
+  "available_currencies": ["USD"],
   "pulse": {
     "settled_capture_minor": 10000,
     "refunded_minor": 2000,
@@ -387,10 +397,9 @@ research needs a concrete shape to test whether one request can render the page:
 }
 ```
 
-Candidate reads are:
+The v1 read surface is deliberately one endpoint:
 
 ```text
-GET /analytics/v1/protected/commerce/currencies
 GET /analytics/v1/protected/commerce/overview?currency=USD&from=YYYY-MM-DD&to=YYYY-MM-DD
 ```
 
@@ -446,9 +455,19 @@ Desktop uses one wide trend followed by funnel and products in a two-column
 row. Mobile stacks every region in reading order. The intended controls are:
 
 - URL-owned `currency`, `from`, and `to`, validated by TanStack Router + zod;
-- 7/30/90-day presets, defaulting to 30 days;
+- 7/30/90-day presets, defaulting to 30 days and USD because the current
+  checkout flow is USD-first;
+- `available_currencies` from the overview response populates the selector,
+  while storage and queries retain currency as a mandatory dimension and never
+  add currencies together;
 - TanStack Query for remote state and `AbortSignal` cancellation;
-- Recharts through the shadcn chart pattern, using existing `--chart-*` tokens;
+- Recharts 3.10.1 through the shadcn chart pattern, with `react-is` matching the
+  portal's React 19.2.8 and the existing `--chart-*` tokens;
+- charts imported only from the auto-code-split
+  `/_authenticated/analytics` route, with no more than 10 KiB gzip added to the
+  initial application shell;
+- one trend, one funnel, and one top-products table; no chart builder or
+  customer/order drill-down;
 - table/text equivalents for chart values; and
 - visible UTC labelling instead of silently applying browser local time.
 
@@ -479,9 +498,9 @@ repositories. Service-repository README tables are not treated as API truth.
 | Aspect | Platform today | Candidate delta |
 |--------|----------------|-----------------|
 | Admin artifact | `admin-service` `fa93861` / v0.4.1, static React/Nginx app | Add one SPA route and API client; keep repository browser-only |
-| Admin surface | 13 authenticated screens; 26 operations/23 paths over six services | Two read operations from a seventh service, after implementation |
+| Admin surface | 13 authenticated screens; 26 operations/23 paths over six services | One read operation from a seventh service, after implementation |
 | Home dashboard | Six independent live TanStack queries for attention cards/recent orders | Remains operational and unchanged |
-| UI stack | React 19, strict TypeScript, Vite, TanStack, Tailwind v4, shadcn base-nova | Reuse stack; evaluate Recharts as the only new UI dependency |
+| UI stack | React 19.2.8, strict TypeScript, Vite, TanStack, Tailwind v4, shadcn base-nova; route auto-code-splitting is enabled | Add Recharts 3.10.1 and matching `react-is` only in the lazy analytics route |
 | Aggregator | None by ADR-048 | Read-only analytical service only if the revisit trigger is accepted |
 | Product DB | CNPG PostgreSQL 18.1, three instances; order/checkout/payment are separate DBs | One least-privilege cross-database reader over service-owned views |
 | CNPG roles | Standalone `DatabaseRole` resources per service | Add a non-owning reader; object grants remain outside `DatabaseRole` |
@@ -489,7 +508,7 @@ repositories. Service-repository README tables are not treated as API truth.
 | ClickHouse data | Replicated `otel` logs/traces only, 90-day TTL | Commerce facts are not deployed |
 | ClickHouse identity | Schema Job, Collector, and Grafana use shared `default` credentials | Separate schema/ingest/read identities are required for commerce |
 | RFC-0019 Phase A | Optional facts and batch path documented, explicitly not implemented | Replace the sketch with reviewed metric/API/consistency semantics |
-| Retention | OTel data has 90-day TTL | Commerce product history target is 90 days; physical headroom unresolved |
+| Retention | OTel data has 90-day TTL | Expose 90 commerce days; retain 100 physical days for repair and TTL headroom |
 
 ### Source schema observations
 
@@ -502,10 +521,17 @@ repositories. Service-repository README tables are not treated as API truth.
   append-only double-entry ledger stores capture/refund/reversal truth.
 - Order item names and prices are already point-in-time snapshots, which is the
   correct historical product meaning for this MVP.
+- Runtime repositories contain no production `DELETE` for orders/order items,
+  checkout sessions/items, payments/refunds, or ledger rows. Checkout item
+  cascade exists in DDL but no current runtime path invokes the parent delete.
+  Payment ledger triggers also reject `UPDATE`, `DELETE`, and `TRUNCATE`.
 
 Those observations favour service-owned export views: the view is the explicit
 place to omit sensitive columns and collapse ledger entries into one posting
 amount without teaching an external loader the service's accounting internals.
+Hard deletes are therefore unsupported in v1. Any source migration that adds a
+hard-delete path is a breaking analytics change and must add tombstones or
+partition replacement, or reopen the CDC decision before rollout.
 
 ---
 
@@ -516,6 +542,21 @@ amount without teaching an external loader the service's accounting internals.
 Each service migration creates an `analytics_export` schema and versioned views.
 The platform provisions one CNPG-managed login, exact HBA entries, and the
 secret delivery. The role receives view access only.
+
+The minimum v1 views are intentionally narrow:
+
+| Owner | Export grain | Allowed fields |
+|-------|--------------|----------------|
+| Order | One order | Order ID, status, created/updated/completed timestamps |
+| Order | One order item snapshot | Order ID, product ID/name, quantity, unit price, subtotal |
+| Checkout | One session | Session ID, status, order ID, currency, created/updated timestamps |
+| Payment | One ledger transaction | Payment/order ID, `kind`, currency, positive amount magnitude, created timestamp |
+
+The payment view joins each `ledger_transaction` to exactly its
+`merchant_revenue` entry. Capture, reversal, and refund remain separate by
+`kind`; selecting one account leg prevents balanced ledger entries from being
+counted twice. It excludes `external_ref`, user identity, provider references,
+payment method/token, and account internals from the export contract.
 
 Benefits:
 
@@ -951,12 +992,21 @@ No customer-level drill-down or row-level tenant policy exists in this MVP.
 | ClickHouse unavailable | Return 503; do not fall through to PostgreSQL | API dependency error and ClickHouse alerts |
 | Duplicate source versions | Deduplicate at read cut-off | Duplicate/version diagnostic metric |
 | Late refund/order transition | Correct in overlap or nightly reconciliation | Reconciliation changed-row count |
+| Nightly repair differs | Republish corrected latest-seven-day slices atomically | Changed count/amount by day and currency |
+| Weekly checksum differs | Keep last-good data, repair only mismatched day/currency slices | Full-window mismatch alert and repair result |
 
 Candidate service metrics include sync duration and outcome, rows per source,
 source-watermark lag, completed-batch age, API request duration/errors, and
 ClickHouse query duration/errors. Trace spans must separate PostgreSQL extract,
 ClickHouse insert, publication, and API query stages without putting SQL values
 or business identifiers in span attributes.
+
+Nightly repair reads the latest seven days. Weekly verification compares
+checkout row counts and payment row-count/amount sums by UTC day and currency
+for all 90 exposed days. Order and order-item row counts are compared by UTC day
+because their source tables do not store currency. It repairs only mismatched
+slices, then repeats their checksums; it does not make routine full-history
+replacement the normal ingestion path.
 
 Roll back by suspending the sync, removing the API route and Admin navigation,
 and leaving isolated analytical tables in place for investigation. No rollback
@@ -966,8 +1016,9 @@ writes to PostgreSQL and no transaction path depends on analytics availability.
 
 ## Alternatives
 
-The decision stays open until the research gate. `analytics-service` plus batch
-is the primary direction to test, not an already accepted architecture.
+The owner selected `analytics-service` plus batch as the simple v1 direction.
+That closes the research choice without making the architecture Accepted; the
+later RFC still owns approval and rollout.
 
 | Option | Pros | Cons |
 |--------|------|------|
@@ -987,6 +1038,21 @@ is the primary direction to test, not an already accepted architecture.
 | Cards and tables only | No chart dependency | Trend and conversion shape become slow to scan; fails the primary analytical interaction |
 | Recharts through shadcn | Fits React stack, responsive composition, accessibility layer | New dependency and bundle cost; must be measured and cannot override the portal design system |
 
+### RFC acceptance smoke benchmark
+
+The large speculative benchmark is removed from the research gate. Before a
+later RFC can be accepted for implementation, a small repeatable fixture must
+load one million representative facts and prove:
+
+- 7-, 30-, and 90-day results match PostgreSQL row-count and money checksums;
+- the `argMax` serving query meets 500 ms p95 over the 90-day case;
+- peak query memory stays at or below 512 MiB;
+- the test causes no ClickHouse pod restart; and
+- rows from a failed or incomplete batch remain invisible.
+
+This is acceptance evidence for the chosen design, not a choice between
+`argMax` and request-path `FINAL`.
+
 ### Scale escape triggers
 
 The RFC should not adopt CDC speculatively. Revisit batch when representative
@@ -1003,31 +1069,37 @@ These are review triggers, not automatic migrations.
 
 ---
 
-## Open questions
+## Remaining validation
 
 - [ ] Context7 confirms or corrects ClickHouse 26.7 deduplication, TTL, access,
       insert, and materialized-view claims.
 - [ ] Context7 confirms Altinity 0.27.3 CHI grants/profile/quota rendering and
       secret-update behavior.
 - [ ] Context7 confirms CNPG 1.30 `DatabaseRole` and read-service behavior.
-- [ ] A measured prototype chooses `argMax`, `FINAL`, or a serving table for the
-      90-day response under the 500 ms p95 target.
-- [ ] Decide whether commerce physical TTL is 90 days exactly or 100 days with
-      90 days exposed.
-- [ ] Decide whether the nightly reconciliation is a full bounded reread or
-      partition/day rotation after measuring source cost.
-- [ ] Prove that source rows are append-only/soft-deleted, or add an explicit
-      tombstone/partition-replacement contract; polling by `updated_at` cannot
-      discover a hard-deleted row.
-- [ ] Verify whether the payment export can express one amount per ledger
-      transaction without exposing account internals or double-counting legs.
-- [ ] Verify Recharts version compatibility and production bundle delta against
-      the current React 19/Vite stack.
-- [ ] Decide whether the future API returns one overview document or separates
-      trend/funnel/products after measuring payload and independent failure needs.
+- [ ] Context7 confirms TanStack search/cancellation and Recharts integration
+      claims against the versions used by Admin Portal.
+- [ ] Owner sign-off: **ready for RFC**.
+
+### Owner-resolved v1 decisions
+
+- [x] Use `argMax` on the serving path; keep `FINAL` for verification and
+      diagnosis only.
+- [x] Expose at most 90 days and retain 100 physical days.
+- [x] Run a one-hour-overlap batch every 15 minutes, repair seven days nightly,
+      and checksum 90 days weekly: count plus amount by day/currency where the
+      source carries currency, and order counts by day.
+- [x] Treat later hard-delete support as a breaking analytics change requiring
+      tombstones, slice replacement, or a reopened CDC review.
+- [x] Export one positive amount per payment ledger transaction from only its
+      `merchant_revenue` leg; preserve capture/reversal/refund `kind`.
+- [x] Add Recharts 3.10.1 and matching React 19.2.8 `react-is` only to the lazy
+      analytics route; cap initial-shell growth at 10 KiB gzip.
+- [x] Expose one overview endpoint containing currencies, KPIs, trend, funnel,
+      and top products; do not add a separate currencies endpoint.
 - [x] Defer CDC until a measured scale/freshness/correctness trigger; retain the
       ADR-ready adoption dossier with PeerDB as a revalidated reference candidate.
-- [ ] Owner sign-off: **ready for RFC**.
+- [x] Move the one-million-fact smoke benchmark to the later RFC acceptance
+      gate; do not require a five-million-fact research benchmark.
 
 ---
 
@@ -1072,6 +1144,25 @@ completed-publication boundary, overlap repair, and checksums. CDC would replace
 that simple transport with three database-local slots plus WAL, snapshot,
 failover, schema-evolution, and consumer operations without changing the first
 product outcome.
+
+**Why retain 100 days when the API exposes only 90?**
+
+The ten-day margin lets weekly repair and asynchronous TTL merges operate near
+the boundary without making the visible product contract fuzzy. Validation
+still rejects every query wider than 90 days.
+
+**What happens if a source starts hard-deleting rows?**
+
+V1 does not pretend polling can discover a missing row. The source change is
+breaking for analytics and must ship a tombstone or slice-replacement design,
+or reopen the CDC review before the delete path reaches production.
+
+**Why only one API endpoint?**
+
+The first page is one batch-aligned read with a small bounded payload. Returning
+the currency choices beside KPIs, trend, funnel, and products avoids extra
+loading/failure states. A split is justified only by measured payload or
+independent ownership needs.
 
 **Does future CDC require a PostgreSQL extension?**
 
@@ -1125,6 +1216,7 @@ access to every dataset and operation.
 - [Altinity operator security hardening](https://github.com/Altinity/clickhouse-operator/blob/master/docs/security_hardening.md)
 - [CloudNativePG 1.30 declarative role management](https://cloudnative-pg.io/docs/1.30/declarative_role_management/)
 - [Recharts API](https://recharts.github.io/en-US/api/)
+- [Recharts 3.10.1 package metadata](https://github.com/recharts/recharts/blob/v3.10.1/package.json)
 - [shadcn chart component](https://ui.shadcn.com/docs/components/chart)
 - [TanStack Router search parameters](https://tanstack.com/router/latest/docs/framework/react/guide/search-params)
 - [TanStack Query query cancellation](https://tanstack.com/query/latest/docs/framework/react/guides/query-cancellation)
@@ -1156,31 +1248,32 @@ access to every dataset and operation.
 
 Context7 is not exposed by the current tool session. Primary official sources
 were read directly to prevent the research from being empty, but that is not
-represented as a completed Context7 audit. Every row stays **pending** until an
-actual Context7 query is captured and any correction is applied.
+represented as a completed Context7 audit. MVP-critical rows stay **pending**.
+Rejected-alternative and future-CDC rows are explicitly deferred to the later
+CDC ADR review and do not count as completed Context7 work.
 
 | Claim / section | Source to check | Result |
 |-----------------|-----------------|--------|
 | ReplacingMergeTree dedup is merge-time and query correctness needs explicit dedup | ClickHouse 26.7 engine + dedup docs | pending Context7 |
-| `argMax` vs `FINAL` behavior and cost | ClickHouse 26.7 query/engine docs | pending Context7 + benchmark |
+| `argMax` vs `FINAL` behavior and cost | ClickHouse 26.7 query/engine docs | pending Context7; `argMax` selected, smoke benchmark at RFC acceptance |
 | TTL expiry is applied by merges and may outlive the logical query window | ClickHouse 26.7 TTL docs | pending Context7 |
 | Batch insert sizing and acknowledgement | ClickHouse 26.7 insert strategy | pending Context7 |
-| Incremental MV sees inserted blocks, not later source-table change | ClickHouse 26.7 MV docs | pending Context7 |
-| Refreshable MV replacement/replication semantics | ClickHouse 26.7 refreshable MV docs | pending Context7 |
+| Incremental MV sees inserted blocks, not later source-table change | ClickHouse 26.7 MV docs | deferred — rejected alternative |
+| Refreshable MV replacement/replication semantics | ClickHouse 26.7 refreshable MV docs | deferred — rejected alternative |
 | Users/roles/profiles/quotas and `default` account behavior | ClickHouse 26.7 access docs | pending Context7 |
 | CHI secret-backed users and grant rendering | Altinity operator 0.27.3 | pending Context7 |
 | DatabaseRole is namespace-scoped and reconciles on spec/Secret change | CNPG 1.30 role docs | pending Context7 |
 | DatabaseRole does not own PostgreSQL object grants | CNPG 1.30 API/docs | pending Context7 |
-| Publications are database-local and cannot publish views | PostgreSQL 18 logical replication docs | pending Context7 |
-| Publication column lists are not a security boundary | PostgreSQL 18 column-list/security docs | pending Context7 |
-| Logical slots can retain unbounded WAL unless capped | PostgreSQL 18 settings + CNPG replication docs | pending Context7 |
-| CNPG synchronizes logical decoding slots across failover candidates | CNPG 1.30/development replication docs | pending Context7 + failover prototype |
-| PeerDB initial snapshot, WAL mirrors, version columns, and tombstones | PeerDB current mirror/data-modeling docs | pending Context7 + prototype |
-| PeerDB Kubernetes deployment needs workers, catalog, API, and Temporal | PeerDB self-hosted Helm docs | pending Context7 + chart audit |
-| PeerDB ClickHouse ingestion requires object storage staging and cleanup controls | PeerDB source/deployment docs | pending Context7 + prototype |
-| PeerDB compatibility, license, release, and schema-change behavior | PeerDB current release/source docs | pending Context7 + adoption-time revalidation |
-| Debezium can use built-in `pgoutput` but requires a distinct slot per connector | Debezium stable PostgreSQL connector docs | pending Context7 |
-| MaterializedPostgreSQL is experimental and does not replicate DDL | ClickHouse 26.7 engine docs | pending Context7 |
+| Publications are database-local and cannot publish views | PostgreSQL 18 logical replication docs | deferred — future CDC ADR |
+| Publication column lists are not a security boundary | PostgreSQL 18 column-list/security docs | deferred — future CDC ADR |
+| Logical slots can retain unbounded WAL unless capped | PostgreSQL 18 settings + CNPG replication docs | deferred — future CDC ADR |
+| CNPG synchronizes logical decoding slots across failover candidates | CNPG 1.30/development replication docs | deferred — future CDC ADR + failover prototype |
+| PeerDB initial snapshot, WAL mirrors, version columns, and tombstones | PeerDB current mirror/data-modeling docs | deferred — future CDC ADR + prototype |
+| PeerDB Kubernetes deployment needs workers, catalog, API, and Temporal | PeerDB self-hosted Helm docs | deferred — future CDC ADR + chart audit |
+| PeerDB ClickHouse ingestion requires object storage staging and cleanup controls | PeerDB source/deployment docs | deferred — future CDC ADR + prototype |
+| PeerDB compatibility, license, release, and schema-change behavior | PeerDB current release/source docs | deferred — future CDC ADR + adoption-time revalidation |
+| Debezium can use built-in `pgoutput` but requires a distinct slot per connector | Debezium stable PostgreSQL connector docs | deferred — future CDC ADR |
+| MaterializedPostgreSQL is experimental and does not replicate DDL | ClickHouse 26.7 engine docs | deferred — rejected alternative |
 | Search params remain URL-owned in the existing frontend stack | TanStack Router current docs | pending Context7 |
 | Query cancellation consumes AbortSignal | TanStack Query current docs | pending Context7 |
 | Recharts accessibility and React 19 support | Recharts current docs/package peer range | pending Context7 |
@@ -1198,8 +1291,8 @@ actual Context7 query is captured and any correction is applied.
 - [x] Five Mermaid diagrams distinguish deployed from reference components
 - [x] No Kubernetes manifest or application implementation is included
 - [x] No customer PII or payment credential is proposed for export
-- [ ] `argMax`/`FINAL` serving choice benchmarked against a representative 90-day dataset
-- [ ] Open questions resolved or explicitly deferred by the owner
+- [x] `argMax` selected for v1; one-million-fact smoke benchmark moved to RFC acceptance
+- [x] Product/design questions resolved or explicitly deferred by the owner
 - [ ] Owner sign-off: **ready for RFC**
 
 ---
