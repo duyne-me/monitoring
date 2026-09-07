@@ -121,6 +121,17 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **ClickHouse gets an S3 disk on RustFS and a `hot_cold` storage policy**
+  (`03-storage-rustfs.xml` on the CHI; 2 of 4). Disk `s3` at
+  `rustfs-svc.rustfs.svc.cluster.local:9000/clickhouse-otel/{replica}/` with
+  credentials via `from_env` from `clickhouse-rustfs-credentials`, a 1Gi local
+  cache over it, `hot` = `default` so existing tables can adopt the policy by
+  `ALTER`, `move_factor 0` (only TTL moves, never node-free-space), no
+  TTL-move-on-insert, zero-copy replication explicitly off. Rolls the three pods
+  once; no table references the policy until the schema change lands. On Kind
+  this is the production shape, not capacity: every path is the same node
+  filesystem and cold bytes exist three times.
+
 - **The two Temporal capacity alerts finally exist, and ship with something that
   acts on them.** `TemporalScheduleToStartLatencyHigh` (SDK schedule-to-start p99
   > 0.2 s for 10m warning, > 1 s for 5m critical, by `task_queue`) and

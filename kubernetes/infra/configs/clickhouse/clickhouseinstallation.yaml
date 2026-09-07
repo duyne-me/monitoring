@@ -1,5 +1,7 @@
 # ClickHouseInstallation — the supplementary OLAP backend for OTel logs+traces
-# SQL (RFC-0019 Phase B / ADR-023). Single shard x THREE replicas on local PVCs,
+# SQL (RFC-0019 Phase B / ADR-023). Single shard x THREE replicas on local PVCs
+# for the hot window, with parts older than 7 days moved to the in-cluster RustFS
+# object store (03-storage-rustfs.xml below; owner decision 2026-09-07, no RFC),
 # coordinated by the `keeper` CHK in this same directory (RFC-0028 / ADR-065);
 # the OTel Collector fans out logs+traces here alongside
 # VictoriaLogs / VictoriaTraces (metrics stay on VictoriaMetrics — never here).
@@ -223,6 +225,88 @@ spec:
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
             </trace_log>
         </clickhouse>
+      # Cold tier on RustFS (2026-09-07). Prose here, not in the XML: XML forbids
+      # `--` inside a comment and a malformed file crash-loops every replica.
+      #
+      # WHAT THIS BUYS ON KIND, HONESTLY: the production shape and a bounded hot
+      # tier, not capacity. The `default` disk, the s3 metadata, the cache path
+      # and RustFS's own PV are all hostPath directories on the same node
+      # filesystem, and without zero-copy each replica uploads its own objects,
+      # so cold bytes exist three times. The rehearsal is the point; the
+      # capacity story starts on a real object store.
+      #
+      # Disk `s3`: endpoint is the RustFS Service, plain HTTP in-cluster, path
+      # style (bucket in the path, like every other consumer here), region
+      # us-east-1 because RustFS wants one. The `{replica}` macro gives each
+      # replica its own prefix so `mc ls` shows ownership and a lost PVC's
+      # orphans are one `mc rm -r` on that prefix. UNVERIFIED that the server
+      # expands macros in a disk endpoint: check with `mc ls rustfs/clickhouse-otel/`
+      # after the roll and, if there is a literal `{replica}/` prefix, drop it
+      # for a shared prefix (object names are random either way).
+      # skip_access_check stays at its default (false): a wrong bucket or
+      # credential fails pod 1 at start, with two replicas still serving, instead
+      # of failing the first TTL move a week later. The cost is that a pod
+      # restarting while RustFS is down stays down until RustFS returns.
+      #
+      # Disk `s3_cache`: a local cache over `s3`, on the PVC path. 1Gi is 10% of
+      # the nominal PVC and enough for marks, index segments and repeated 30/90
+      # day panel scans; it duplicates cold bytes, so it must not eat the hot
+      # budget.
+      #
+      # Policy `hot_cold`: `hot` MUST be the `default` disk, because ALTER TABLE
+      # MODIFY SETTING storage_policy is only accepted when the new policy
+      # contains every disk of the old one. move_factor 0: the "hot" disk is the
+      # quota-less node filesystem, the default 0.1 would fire at node < 10% free
+      # and then write to that same filesystem; only TTL drives moves here.
+      # perform_ttl_move_on_insert false: an INSERT of a late row never waits on
+      # RustFS; it lands hot and moves in the background.
+      #
+      # Zero-copy replication off explicitly (upstream DR advice): each replica
+      # owns its objects. No table references the policy until the schema
+      # change (PR 3 of 4) lands, so reverting this file is safe until then.
+      # Once parts sit on s3_cache, never remove this file while they do.
+      #
+      # Not set, noted: background_move_pool_size is the throttle if RustFS CPU
+      # (2.5 limit) saturates when three replicas move a day's parts at once.
+      03-storage-rustfs.xml: |
+        <clickhouse>
+            <storage_configuration>
+                <disks>
+                    <s3>
+                        <type>s3</type>
+                        <endpoint>http://rustfs-svc.rustfs.svc.cluster.local:9000/clickhouse-otel/{replica}/</endpoint>
+                        <access_key_id from_env="CLICKHOUSE_S3_ACCESS_KEY_ID"/>
+                        <secret_access_key from_env="CLICKHOUSE_S3_SECRET_ACCESS_KEY"/>
+                        <region>us-east-1</region>
+                        <metadata_path>/var/lib/clickhouse/disks/s3/</metadata_path>
+                        <skip_access_check>false</skip_access_check>
+                    </s3>
+                    <s3_cache>
+                        <type>cache</type>
+                        <disk>s3</disk>
+                        <path>/var/lib/clickhouse/disks/s3_cache/</path>
+                        <max_size>1Gi</max_size>
+                    </s3_cache>
+                </disks>
+                <policies>
+                    <hot_cold>
+                        <volumes>
+                            <hot>
+                                <disk>default</disk>
+                            </hot>
+                            <cold>
+                                <disk>s3_cache</disk>
+                                <perform_ttl_move_on_insert>false</perform_ttl_move_on_insert>
+                            </cold>
+                        </volumes>
+                        <move_factor>0</move_factor>
+                    </hot_cold>
+                </policies>
+            </storage_configuration>
+            <merge_tree>
+                <allow_remote_fs_zero_copy_replication>0</allow_remote_fs_zero_copy_replication>
+            </merge_tree>
+        </clickhouse>
     clusters:
       - name: otel
         layout:
@@ -260,6 +344,24 @@ spec:
               ports:
                 - name: metrics
                   containerPort: 9363
+              # RustFS credentials for the s3 disk in 03-storage-rustfs.xml, read
+              # there via from_env so no key is ever written into this manifest
+              # (the Altinity-documented pattern). Deliberately NOT named AWS_*:
+              # the S3 SDK's default credential chain would then pick them up for
+              # any unrelated s3() table function too. Secret is landed by the
+              # clickhouse-rustfs ClusterExternalSecret (same OpenBAO RustFS keys
+              # Pyroscope and CNPG use).
+              env:
+                - name: CLICKHOUSE_S3_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-rustfs-credentials
+                      key: ACCESS_KEY_ID
+                - name: CLICKHOUSE_S3_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: clickhouse-rustfs-credentials
+                      key: ACCESS_SECRET_KEY
               securityContext:
                 allowPrivilegeEscalation: false
                 runAsNonRoot: true
