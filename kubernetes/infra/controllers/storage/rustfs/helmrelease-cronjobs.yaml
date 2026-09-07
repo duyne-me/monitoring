@@ -53,7 +53,7 @@ spec:
           - |
             set -e
             ENDPOINT="http://rustfs-svc.rustfs.svc.cluster.local:9000"
-            BUCKETS="pg-backups-cnpg pyroscope-profiles"
+            BUCKETS="pg-backups-cnpg pyroscope-profiles clickhouse-otel"
 
             # Gate on the server actually SERVING, not on the alias being writable.
             # `mc alias set` can return 0 against an endpoint that is not yet backed by a

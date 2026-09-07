@@ -121,6 +121,14 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **Prerequisites for the ClickHouse cold tier on RustFS.** A `clickhouse-otel`
+  bucket in both `mc` bucket lists (the run-once Job and the 30-minute CronJob,
+  which must stay in step), a `clickhouse-rustfs` ClusterExternalSecret that
+  lands `clickhouse-rustfs-credentials` in `monitoring` from the existing
+  OpenBAO RustFS keys, and `clickhouse-local` now `dependsOn: storage-local` —
+  the S3 disk's startup access check needs the bucket before the first replica
+  can start. Nothing reads the Secret yet; the disk itself is the next change.
+
 - **The two Temporal capacity alerts finally exist, and ship with something that
   acts on them.** `TemporalScheduleToStartLatencyHigh` (SDK schedule-to-start p99
   > 0.2 s for 10m warning, > 1 s for 5m critical, by `task_queue`) and
