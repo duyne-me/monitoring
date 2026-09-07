@@ -121,6 +121,19 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **The cold tier gets its observability and its docs** (4 of 4).
+  `ClickHouseS3Errors` (warning, `max by (replica)` on the per-code
+  `ClickHouseErrorMetric_S3_ERROR` series from `:9363`) with a runbook that
+  spells out what survives a RustFS outage (INSERTs, hot-window reads) and what
+  does not (cold reads, moves, a pod restarting into the disk access check);
+  alert-catalog § 8b row and Summary re-derived to 229; a **Cold tier on RustFS**
+  section in the ClickHouse hub (mechanics, 3× copies on Kind, the
+  no-lifecycle rule, RustFS-down behaviour, orphan policy, verify SQL, ordered
+  rollback); `fundamentals.md` no longer calls the tier *planned*; the compose
+  signal map records the storage-tier divergence. Dashboards untouched — the
+  server-engine board is generated in obs-as-code, so its disk panel selector
+  is a follow-up there.
+
 - **`otel_logs` and `otel_traces` move to the cold tier after 7 days** (3 of 4):
   `TTL ... + 7 d TO VOLUME 'cold', ... + 90 d` and `storage_policy = 'hot_cold'`
   in the schema DDL, in the server's normalised form so `SHOW CREATE TABLE`
@@ -391,6 +404,13 @@ Skeleton (copy what you need):
 ### Bugfix
 
 #### Observability
+
+- **The ClickHouse disk pair is pinned to `disk="default"`.** With the RustFS
+  cold tier the exporter publishes `DiskFreeBytes` / `DiskTotalBytes` for the
+  `s3` and `s3_cache` disks too, and an object-storage disk reports total and
+  free as the UInt64 ceiling — an unpinned ratio would have carried two extra
+  always-healthy series per replica. VERIFY-AT-KIND marker recorded until the
+  label set is read off the cluster.
 
 - **Every repo-managed ClickHouse `system.*` log table now drops expired parts
   instead of rewriting them, and the last unbounded table is gone** (issue #1025,

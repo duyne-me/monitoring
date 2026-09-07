@@ -154,7 +154,7 @@ Keycloak alert set.
 | Which service is slow / erroring? | VictoriaMetrics | `spanmetrics` connector | identical both stacks |
 | Where did a request go? | VictoriaTraces | `otlphttp/victoriatraces` | identical |
 | Full-text log search / correlation | VictoriaLogs | `otlphttp/victorialogs` + Vector | identical sink; edge contributes access logs via Vector only |
-| Long-retention SQL over logs+traces | ClickHouse | `clickhouse` exporter | **schema owner differs**: local keeps `create_schema: true` (single node, no race to have); the cluster runs `create_schema: false` with a bootstrap Job owning the DDL — RFC-0028. Same tables either way |
+| Long-retention SQL over logs+traces | ClickHouse | `clickhouse` exporter | **schema owner differs**: local keeps `create_schema: true` (single node, no race to have); the cluster runs `create_schema: false` with a bootstrap Job owning the DDL — RFC-0028. **Storage tier differs too**: compose is PVC-only (no RustFS or MinIO in the stack); the cluster moves `otel_logs` / `otel_traces` parts older than 7 d to RustFS and drops at 90 d. Same columns and keys either way |
 | Continuous profiles | Pyroscope | pushed by services | identical |
 | Is the collector / ClickHouse itself up? | VictoriaMetrics | **vmagent scrape** | cluster: operator CRs · local: static config |
 | Are inserts / merges / disk failing? | VictoriaMetrics | ClickHouse `:9363` (both, per-pod on the cluster since RFC-0028) / metrics-exporter (cluster) | same alert names, different series — §5 |

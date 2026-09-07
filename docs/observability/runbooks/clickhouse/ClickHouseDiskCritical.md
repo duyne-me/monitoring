@@ -5,7 +5,7 @@
 | **Severity** | critical |
 | **Category** | observability |
 | **Source** | `.../prometheusrules/observability/clickhouse-alerts.yaml` |
-| **Metrics** | `chi_clickhouse_metric_DiskFreeBytes / chi_clickhouse_metric_DiskTotalBytes < 0.05` |
+| **Metrics** | `chi_clickhouse_metric_DiskFreeBytes{disk="default"} / chi_clickhouse_metric_DiskTotalBytes{disk="default"} < 0.05` — the hot disk only; on Kind the cold tier (RustFS) lives on the same node filesystem, so moving parts cold frees nothing here |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Data analysis · ClickHouse → Server engine |
 | **Local-stack** | present — same ratio `< 0.05` from the server's `ClickHouseAsyncMetrics_Disk*_default` on the named docker volume; there growing the volume is a real option |

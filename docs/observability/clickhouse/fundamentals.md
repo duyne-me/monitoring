@@ -307,10 +307,15 @@ flowchart TB
 ```
 
 Ingest topology (Collector fan-out, metrics never land here) stays on the
-[hub Architecture](README.md#architecture). S3 TTL-move of cold parts is
-**planned** for cloud; Kind uses PVC + TTL **drop**.
+[hub Architecture](README.md#architecture). Since 2026-09-07 the cold tier is
+**deployed** on Kind: `otel_logs` and `otel_traces` move parts older than 7 days
+to the in-cluster RustFS object store (`TTL ... TO VOLUME 'cold'`) and still
+**drop** them at 90 days; the third table and the `system.*` logs stay on the
+PVC. On Kind that buys the production shape, not capacity — every path is the
+same node filesystem and, without zero-copy, cold bytes exist three times. The
+mechanics are in the [hub](README.md#cold-tier-on-rustfs).
 
-**A trap to carry into that planned move:** ClickHouse keeps metadata that
+**A trap that now applies here:** ClickHouse keeps metadata that
 references every object it wrote, so the object store must never delete parts
 behind its back. A bucket lifecycle rule that expires objects on the same
 schedule as the table TTL will race the engine, and the loser is a query that
@@ -318,7 +323,9 @@ reads metadata pointing at an object that is gone. Give the engine room to
 finish its own cleanup — table TTL first, bucket lifecycle a few days later as
 a **backstop for orphans only**, never as the primary retention mechanism. The
 [alignment rule](#the-alignment-rule) matters more here than on a PVC, because
-a month-sized part rewritten every 4 hours is egress you pay for.
+a month-sized part rewritten every 4 hours is egress you pay for. The RustFS
+bucket therefore carries **no lifecycle rule at all**: the engine deletes, the
+bucket never expires.
 
 ---
 
