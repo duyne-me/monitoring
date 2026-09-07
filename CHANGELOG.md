@@ -589,6 +589,22 @@ Skeleton (copy what you need):
   CRs reached `Current`, and `apps-local` went Ready for the first time — 29/29
   Kustomizations.
 
+#### Local-stack
+
+- **The compose ClickHouse alert slice matches the cluster catalog again.**
+  `ClickHouseDiskAlmostFull` said "30-day TTL" while the collector sets
+  `ttl: 2160h` (90 d); `ClickHouseMergesFailing` read
+  `ClickHouseProfileEvents_FailedMerges`, a counter the server never publishes,
+  so it could not fire and only padded the C21 count; `ClickHouseServerUnreachable`
+  was the name the cluster retired in RFC-0028 — renamed to
+  `ClickHouseAllReplicasUnreachable` so the runbook of that name transfers, and
+  every rule with a cluster twin now carries its `runbook_url`. The § 5C
+  cluster↔local mapping in `local-stack/docs/observability.md` was rewritten
+  against the live cluster expressions (it still listed three deleted
+  `chi_clickhouse_event_*` rules and the pre-fix disk ratio), and the C21 row
+  and inline check agree on **18 alerting** rules (the table said 18, the
+  script wanted 19).
+
 #### Docs
 
 - **414 lines of planning notes removed from the dashboard reference.** The page

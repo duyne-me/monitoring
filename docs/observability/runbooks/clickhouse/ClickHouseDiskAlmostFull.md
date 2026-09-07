@@ -8,7 +8,7 @@
 | **Metrics** | `chi_clickhouse_metric_DiskFreeBytes / chi_clickhouse_metric_DiskTotalBytes < 0.15` |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Data analysis |
-| **Local-stack** | not present |
+| **Local-stack** | present — `ClickHouseAsyncMetrics_DiskAvailable_default / DiskTotal_default < 0.15` on the named docker volume |
 
 ## Meaning
 

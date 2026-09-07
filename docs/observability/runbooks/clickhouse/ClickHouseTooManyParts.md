@@ -8,7 +8,7 @@
 | **Metrics** | `chi_clickhouse_metric_PartsActive > 300` |
 | **Status** | active · currently ~98 on a loaded cluster |
 | **Dashboard** | ClickHouse → Data analysis |
-| **Local-stack** | not present |
+| **Local-stack** | present — `ClickHouseMetrics_PartsActive > 300` from the server's `:9363` endpoint |
 
 ## Meaning
 

@@ -6,10 +6,16 @@
 # The series differ by design: the cluster reads the Altinity
 # metrics-exporter's chi_clickhouse_* families; locally the server's own
 # Prometheus endpoint speaks ClickHouseMetrics_* / ClickHouseProfileEvents_* /
-# ClickHouseAsyncMetrics_* / ClickHouseErrorMetric_* (metrics.xml). Two
-# cluster rules have no local counterpart and are deliberately absent:
-# ClickHouseOperatorDown and ClickHouseOperatorReconcileErrors — there is no
-# operator in Compose.
+# ClickHouseAsyncMetrics_* / ClickHouseErrorMetric_* (metrics.xml). Cluster
+# rules with no local counterpart are deliberately absent: the operator pair
+# (ClickHouseOperatorDown, ClickHouseOperatorReconcileErrors — no operator in
+# Compose) and the replication set (ClickHouseReplicaUnreachable,
+# ClickHouseReadonlyReplica, ClickHouseZooKeeperExceptions,
+# ClickHouseKeeperNoLeader, ClickHouseKeeperQuorumDegraded — one node, no
+# Keeper). Two rules here have NO cluster twin and carry no runbook_url:
+# ClickHouseInsertsRejected and ClickHouseInsertsFailing read ProfileEvents the
+# server publishes locally but the Altinity exporter never did, which is why
+# the cluster deleted its copies (alert-catalog § 8b).
 groups:
   - name: clickhouse-engine
     interval: 30s
@@ -23,13 +29,19 @@ groups:
       # DDL at startup and a dead ClickHouse blocks every collector restart.
       # The cluster moved that DDL into a bootstrap Job (RFC-0028), so there
       # the same outage costs only the ClickHouse sink.
-      - alert: ClickHouseServerUnreachable
+      #
+      # Named after the cluster's critical rule, not the retired
+      # ClickHouseServerUnreachable: with one node, "all replicas unreachable"
+      # and "the server is down" are the same event, and the runbook of that
+      # name is the one to practise here.
+      - alert: ClickHouseAllReplicasUnreachable
         expr: up{job="clickhouse"} == 0
         for: 5m
         labels:
           severity: critical
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseAllReplicasUnreachable.md"
           summary: "ClickHouse is down"
           description: "The OTel logs/traces store has been unreachable for 5 minutes — SQL over otel.otel_logs/otel_traces is gone, and the OTel Collector's create_schema step will block every collector restart until it returns."
 
@@ -45,8 +57,9 @@ groups:
           severity: warning
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseDiskAlmostFull.md"
           summary: "ClickHouse disk under 15% free"
-          description: "The OTel store's volume is filling. MergeTree refuses writes near full; the 30-day TTL cannot outrun a sustained ingest spike."
+          description: "The OTel store's volume is filling. MergeTree refuses writes near full; the 90-day table TTL (otel-collector-config.yaml ttl: 2160h) cannot outrun a sustained ingest spike."
 
       - alert: ClickHouseDiskCritical
         expr: |
@@ -57,6 +70,7 @@ groups:
           severity: critical
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseDiskCritical.md"
           summary: "ClickHouse disk under 5% free"
           description: "Write failures are imminent. Drop old partitions or grow the volume now."
 
@@ -67,6 +81,7 @@ groups:
           severity: warning
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseTooManyParts.md"
           summary: "ClickHouse active parts high"
           description: "Merges are not keeping up with inserts. Left alone this ends in delayed, then rejected inserts."
 
@@ -90,15 +105,10 @@ groups:
           summary: "ClickHouse insert queries failing"
           description: "Insert queries are erroring — telemetry rows are being lost at the door."
 
-      - alert: ClickHouseMergesFailing
-        expr: rate(ClickHouseProfileEvents_FailedMerges[5m]) > 0
-        for: 10m
-        labels:
-          severity: warning
-          category: observability
-        annotations:
-          summary: "ClickHouse merges failing"
-          description: "Background merges are failing; parts will accumulate until inserts throttle."
+      # ClickHouseMergesFailing was removed 2026-09-07: it read
+      # ClickHouseProfileEvents_FailedMerges, a counter the server does not
+      # publish (the cluster file records the same name as fiction), so the
+      # rule could never fire and only padded the C21 count.
 
       - alert: ClickHouseInsertsDelayed
         expr: rate(ClickHouseProfileEvents_DelayedInserts[5m]) > 0
@@ -107,6 +117,7 @@ groups:
           severity: info
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsDelayed.md"
           summary: "ClickHouse throttling inserts"
           description: "The parts_to_delay_insert guard is slowing inserts — the step before rejection."
 
@@ -127,5 +138,6 @@ groups:
           severity: info
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseServerErrorsElevated.md"
           summary: "ClickHouse system.errors rate elevated"
           description: "The server is accumulating errors faster than 5/s. Check the top-N errors panel on the server-engine dashboard."
