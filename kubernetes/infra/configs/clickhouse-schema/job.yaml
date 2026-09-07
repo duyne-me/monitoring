@@ -66,7 +66,7 @@ spec:
           # Same tag as the CHI: the server image ships clickhouse-client, so
           # the client is never older than the server it talks to, and the
           # text(tokenizer = ...) index syntax in the logs DDL is 26.x-only.
-          image: clickhouse/clickhouse-server:26.7
+          image: clickhouse/clickhouse-server:26.8
           env:
             # Must equal spec.configuration.clusters[0].layout.replicasCount in
             # configs/clickhouse/clickhouseinstallation.yaml. Duplicated on
