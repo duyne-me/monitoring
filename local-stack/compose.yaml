@@ -421,7 +421,7 @@ services:
       victoria-logs: { condition: service_started }
 
   victoria-metrics:
-    image: victoriametrics/victoria-metrics:v1.150.0
+    image: victoriametrics/victoria-metrics:v1.151.0
     command:
       - "-storageDataPath=/victoria-metrics-data"
       # RFC-0014 P1 (D-1/D-2): OTLP ingest shaping. usePrometheusNaming turns
