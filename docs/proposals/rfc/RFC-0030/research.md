@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **RFC** | RFC-0030 |
-| **Status** | researching |
+| **Status** | researching → gate passed with README |
 | **Scope** | platform-wide |
 | **Created** | 2026-09-06 |
 | **Last updated** | 2026-09-07 |
@@ -1183,7 +1183,7 @@ These are review triggers, not automatic migrations.
 - [x] Context7 audited the PostgreSQL extension alternatives and PeerDB's
       reference deployment shape; both retain adoption-time version and
       prototype gates.
-- [ ] Owner sign-off: **ready for RFC**.
+- [x] Owner sign-off: **ready for RFC** (2026-09-07).
 
 ### Owner-resolved v1 decisions
 
@@ -1404,7 +1404,7 @@ acceptance benchmark or adoption-time compatibility tests.
 - [x] No customer PII or payment credential is proposed for export
 - [x] `argMax` selected for v1; one-million-fact smoke benchmark moved to RFC acceptance
 - [x] Product/design questions resolved or explicitly deferred by the owner
-- [ ] Owner sign-off: **ready for RFC**
+- [x] Owner sign-off: **ready for RFC** (2026-09-07)
 
 ---
 _Last verified: 2026-09-07 (Context7 CLI audit + official versioned docs and
