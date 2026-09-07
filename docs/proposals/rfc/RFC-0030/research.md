@@ -6,7 +6,7 @@
 | **Status** | researching |
 | **Scope** | platform-wide |
 | **Created** | 2026-09-06 |
-| **Last updated** | 2026-09-06 |
+| **Last updated** | 2026-09-07 |
 
 > **Research only.** Nothing in this document is deployed. Candidate components
 > and paths are labelled **reference — not deployed** until an RFC is reviewed,
@@ -245,6 +245,9 @@ happened.
 - Weekly: compare source and ClickHouse checksums across the full 90-day window;
   re-read only mismatched slices.
 - Watermarks advance only with the completed batch.
+- Buffer ClickHouse writes into at least 1,000 rows per insert, targeting
+  10,000–100,000 when the bounded batch permits it; acknowledge a source slice
+  only after ClickHouse accepts its insert.
 - User queries filter to at most 90 days. ClickHouse keeps 100 physical days so
   TTL merge timing and the weekly repair have ten days of operational headroom;
   the extra days are never exposed as product history.
@@ -504,7 +507,7 @@ repositories. Service-repository README tables are not treated as API truth.
 | Aggregator | None by ADR-048 | Read-only analytical service only if the revisit trigger is accepted |
 | Product DB | CNPG PostgreSQL 18.1, three instances; order/checkout/payment are separate DBs | One least-privilege cross-database reader over service-owned views |
 | CNPG roles | Standalone `DatabaseRole` resources per service | Add a non-owning reader; object grants remain outside `DatabaseRole` |
-| ClickHouse | 26.7, Altinity operator 0.27.3, 1 shard × 3 replicas, CHK ×3 | Add isolated `commerce` schema/tables |
+| ClickHouse | 26.7, Altinity operator Helm chart 0.27.3, 1 shard × 3 replicas, CHK ×3 | Add isolated `commerce` schema/tables |
 | ClickHouse data | Replicated `otel` logs/traces only, 90-day TTL | Commerce facts are not deployed |
 | ClickHouse identity | Schema Job, Collector, and Grafana use shared `default` credentials | Separate schema/ingest/read identities are required for commerce |
 | RFC-0019 Phase A | Optional facts and batch path documented, explicitly not implemented | Replace the sketch with reviewed metric/API/consistency semantics |
@@ -732,6 +735,58 @@ namespace and staging bucket; deploy dedicated dependencies only if the
 prototype disproves safe sharing. Keep the PeerDB UI and administrative APIs
 cluster-internal unless a separately authenticated operational use case exists.
 
+The published production guide is a useful complexity baseline, not a homelab
+sizing recommendation. It calls for a PostgreSQL 15+ catalog, Temporal 1.24.2+
+and substantially resourced three-node worker groups; its sample flow worker
+requests 4 CPU/16 GiB and limits 8 CPU/32 GiB. A `lowCost` deployment can prove
+the protocol in a disposable environment, but cannot be used as production
+capacity evidence. Adoption must size from the workload measurements in this
+dossier.
+
+### If PeerDB is selected later
+
+The future path is three independent mirrors, not one cluster-wide stream:
+
+1. Create one peer, allowlisted publication and failover-capable logical slot
+   inside each of the `order`, `checkout`, and `payment` databases.
+2. Take a consistent initial snapshot. PeerDB can partition large table reads
+   by CTID and stage the copy as Avro before ClickHouse loads it.
+3. Retain WAL from each snapshot position while the corresponding mirror
+   catches up, then enter steady-state `pgoutput` consumption.
+4. Represent updates as newer versions and deletes as tombstones in isolated
+   raw tables; never aggregate raw rows directly.
+5. Build the serving result from the latest non-deleted version and publish the
+   minimum of the three independently safe watermarks as `data_through`.
+
+```mermaid
+sequenceDiagram
+  participant PG as One PostgreSQL database
+  participant PW as PeerDB workers — reference
+  participant S3 as Staging bucket — reference
+  participant RAW as ClickHouse raw — reference
+  participant API as Serving model/API — reference
+
+  Note over PG,API: Repeat independently for order, checkout, and payment
+  PW->>PG: Begin consistent snapshot and record WAL position
+  PG-->>PW: CTID-partitioned snapshot rows
+  PW->>S3: Stage bounded Avro objects
+  S3-->>RAW: Initial bulk load
+  PW->>PG: Resume pgoutput from recorded position
+  PG-->>PW: INSERT, UPDATE, DELETE changes
+  PW->>S3: Stage versioned CDC batches
+  S3-->>RAW: Insert versions and tombstones
+  RAW-->>API: Latest non-deleted rows
+  Note over RAW,API: Minimum safe source watermark becomes data_through
+```
+
+An adoption PR would therefore need, at minimum: a PeerDB namespace; flow API,
+flow workers and snapshot worker; catalog PostgreSQL; isolated Temporal
+namespace or a separately justified cluster; dedicated RustFS staging bucket;
+three mirrors; ClickHouse raw and serving objects; source and target identities;
+External Secrets, HBA and NetworkPolicy; resource budgets; metrics, alerts,
+dashboard and runbook. The current AGPL-3.0 source license and every distributed
+image/chart also require legal and provenance review at adoption time.
+
 ### Publication and data-minimisation boundary
 
 PostgreSQL logical publications accept persistent base or partitioned tables,
@@ -765,16 +820,18 @@ Candidate source controls:
 - a dedicated login with `LOGIN`, `REPLICATION`, no ownership, no business
   writes, and only the `SELECT` needed for initial snapshot;
 - platform-owned publication/slot DDL rather than granting the connector broad
-  database `CREATE` or table ownership; and
+  database `CREATE` or table ownership;
 - direct TLS `verify-full` access to the CNPG read-write Service, constrained by
   HBA and NetworkPolicy, never through PgDog; and
 - an encrypted, private staging bucket with a dedicated identity, short
   lifecycle, cleanup alert, and no access from analytics-service or browsers.
 
-`DatabaseRole` may reconcile the login and Secret when its v1 API is verified
-to represent the required attributes. Publications, replica identity, object
-grants, and ownership remain explicit database DDL; the role CR must not be
-described as an object-privilege controller.
+`DatabaseRole` can reconcile the login and Secret when its v1 API represents
+the required attributes. Publications, replica identity, object grants, and
+ownership remain explicit database DDL; the role CR must not be described as an
+object-privilege controller. Direct manual `ALTER ROLE` drift is not continuously
+detected: CloudNativePG applies the desired role again when the `DatabaseRole`
+or referenced password Secret changes.
 
 ### Delivery and query correctness
 
@@ -913,7 +970,9 @@ CloudNativePG 1.30 recommends standalone `DatabaseRole` resources for modern
 GitOps role lifecycle. The resource manages role attributes and password/cert
 material, is namespace-scoped with its Cluster and Secret, and applies when its
 specification or Secret changes. It does not define database/schema/table/view
-privileges; those remain PostgreSQL DDL.
+privileges; those remain PostgreSQL DDL. Its `PasswordSecretChange` condition
+records the observed Secret resource version; this is reconciliation evidence,
+not continuous detection of manual SQL drift.
 
 Candidate controls:
 
@@ -923,7 +982,8 @@ Candidate controls:
   reject;
 - `databaseRoleReclaimPolicy: retain` for a production-style service identity;
 - OpenBAO → ESO basic-auth Secret with `cnpg.io/reload: "true"`;
-- read service endpoint and bounded statement/lock timeouts; and
+- explicit `product-db-ro` replica Service endpoint and bounded statement/lock
+  timeouts, with replica lag included in extraction/data-through checks; and
 - only `CONNECT`, export-schema `USAGE`, and named-view `SELECT`.
 
 The research deliberately rejects `ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON
@@ -945,10 +1005,14 @@ Candidate identities:
 | `commerce_ingest` | Insert facts and read/write its specific sync control objects |
 | `commerce_read` | Select only the tables/views needed by the API |
 
-Altinity supports user passwords from Kubernetes Secret references in the CHI.
-The Context7/operator audit must still verify grants, profiles, quotas, and
-update behavior on the pinned 0.27.3 CRD before choosing CHI configuration over
-SQL-managed access entities.
+Altinity CHI configuration supports users, profiles, quotas and password values
+from Kubernetes Secret references. The older `k8s_secret_*` password syntax is
+deprecated; new configuration must use `valueFrom.secretKeyRef`. The audit did
+not establish that CHI is an exact object-grant controller or that a Secret-only
+change always produces the required rollout. Use SQL-managed access entities
+and explicit grants for database/table/view privileges. A later RFC must prove
+Secret rotation and reconciliation on the pinned 0.27.3 chart before deciding
+which user settings remain in CHI.
 
 ### HTTP boundary
 
@@ -1020,6 +1084,39 @@ The owner selected `analytics-service` plus batch as the simple v1 direction.
 That closes the research choice without making the architecture Accepted; the
 later RFC still owns approval and rollout.
 
+### PostgreSQL analytical extensions
+
+PostgreSQL has credible analytical extensions, but none removes this use case's
+three-database semantic and isolation boundary. They remain alternatives only;
+v1 stays batch → ClickHouse.
+
+| Option | What it provides | Why it is not v1 |
+|--------|------------------|------------------|
+| `pg_duckdb` | DuckDB execution inside PostgreSQL; current upstream supports PostgreSQL 14–18 | Native artifacts and `shared_preload_libraries`; analytical CPU/memory stays inside CNPG; each service database still needs a cross-database assembly layer |
+| `pg_mooncake` | Columnstore mirror backed by Iceberg/Moonlink and DuckDB query integration | Requires `pg_duckdb`, `pg_mooncake`, logical WAL and a streaming/object-store stack; columnstore limitations and background-worker constraints turn it into another CDC system to operate |
+| TimescaleDB continuous aggregates | Incremental, scheduled aggregates over hypertables and `time_bucket` | Strong for time-series in one database, but does not join the separate order/checkout/payment authorities or provide ClickHouse isolation |
+| `postgres_fdw` + materialized views + CronJob | PostgreSQL-only central read model with explicit refresh scheduling | Requires a fourth analytics database and three cross-database FDWs; refresh scans, storage and interactive OLAP still consume PostgreSQL resources |
+| `pg_ivm`, `pg_cron`, `pg_partman` | Incremental-view, scheduling and partition-maintenance building blocks | Useful supporting utilities, not a cross-database analytical backend or governed serving boundary |
+| `pg_analytics` | Historical DuckDB-based extension from ParadeDB | Deprecated and removed from the ParadeDB image; do not benchmark or adopt |
+| Citus/columnar family | Distributed or columnar PostgreSQL storage models | A broader storage/topology migration with native artifacts and a larger day-2 surface than this bounded feature needs |
+
+Installing one is not only `CREATE EXTENSION`. The current standard CNPG
+PostgreSQL 18 image declares no analytical extension. A candidate must prove a
+matching PG 18/OS/architecture artifact, extension-image supply chain, preload
+and restart behavior, per-database `Database.spec.extensions` declarations,
+upgrade compatibility, backups, restores and DR with the same artifacts. CNPG
+ImageVolume support is a reference path, not something deployed here. Until
+those gates and an OLTP resource-isolation benchmark pass, an extension has a
+wider database blast radius than the already deployed ClickHouse engine.
+The canonical lifecycle and current inventory are maintained in the
+[PostgreSQL extensions guide](../../../databases/extensions.md); an RFC should
+link that policy rather than duplicate it.
+
+`pg_duckdb` is the smallest credible extension experiment if the platform later
+wants in-PostgreSQL OLAP. `pg_mooncake` is the closer CDC/columnstore comparison,
+but it does not simplify the operational model enough to displace the deferred
+PeerDB dossier. Neither changes the v1 selection.
+
 | Option | Pros | Cons |
 |--------|------|------|
 | Existing owning APIs + browser aggregation | No new backend; matches current ADR-048 topology | Cannot establish one completed cut-off; repeats joins/semantics in the browser; historical endpoints do not exist |
@@ -1029,7 +1126,7 @@ later RFC still owns approval and rollout.
 | Browser → ClickHouse | Few backend lines | Exposes credentials and arbitrary-query surface; cannot satisfy current trust model |
 | Portal-specific `admin-api-service` | Matches the name of ADR-048's escape hatch | Couples the read model to one UI and makes reuse/ownership less clear |
 | Read-only `analytics-service` + 15-minute batch | Owns a reusable analytical model; isolates OLTP; explicit freshness and failure semantics | New service, sync job, schema, secrets, alerts, runbook, and cross-repo rollout |
-| Self-hosted PeerDB CDC | Purpose-built PostgreSQL → ClickHouse path; snapshot plus CDC; no Kafka requirement | Adds PeerDB workers/control plane, catalog, Temporal dependency, slots, WAL and schema-evolution operations; reference candidate only |
+| Self-hosted PeerDB CDC | Purpose-built PostgreSQL → ClickHouse path; snapshot plus CDC; no Kafka requirement | Adds three mirrors plus workers/control plane, catalog, Temporal, staging storage, slots, WAL and schema-evolution operations; see the deferred adoption dossier |
 | Debezium + Kafka/Redpanda + ClickHouse sink | Mature general-purpose change stream and reusable event backbone | Broker, Connect, topic/schema, sink, ordering and replay operations are disproportionate when analytics is the only consumer |
 | ClickHouse `MaterializedPostgreSQL` | Direct product-integrated replication with few components | Experimental/maturity and operational constraints make it unsuitable as the default production direction |
 | Custom `pgoutput` consumer | Full control and no general CDC control plane | Platform would own snapshot consistency, decoding, checkpointing, type mapping, retry, DDL, normalization and support indefinitely |
@@ -1071,13 +1168,21 @@ These are review triggers, not automatic migrations.
 
 ## Remaining validation
 
-- [ ] Context7 confirms or corrects ClickHouse 26.7 deduplication, TTL, access,
-      insert, and materialized-view claims.
-- [ ] Context7 confirms Altinity 0.27.3 CHI grants/profile/quota rendering and
-      secret-update behavior.
-- [ ] Context7 confirms CNPG 1.30 `DatabaseRole` and read-service behavior.
-- [ ] Context7 confirms TanStack search/cancellation and Recharts integration
-      claims against the versions used by Admin Portal.
+- [x] Context7 confirmed or corrected ClickHouse deduplication, TTL, access,
+      insert, and materialized-view claims; exact 26.7 behavior remains pinned to
+      official versioned documentation and the RFC acceptance benchmark.
+- [x] Context7 confirmed CHI Secret-backed users/profiles/quotas and exposed the
+      unproven exact-grant/Secret-rollout assumptions; the research now chooses
+      SQL-managed object grants and keeps rotation as an RFC acceptance test.
+- [x] Context7 plus the official 1.30 documentation confirmed CNPG
+      `DatabaseRole` and `rw`/`ro`/`r` Service behavior, including the role-drift
+      limitation.
+- [x] Context7 confirmed TanStack URL search and cancellation mechanics and
+      Recharts responsive/accessibility primitives; exact dependency versions
+      remain pinned to upstream package metadata and a bundle measurement.
+- [x] Context7 audited the PostgreSQL extension alternatives and PeerDB's
+      reference deployment shape; both retain adoption-time version and
+      prototype gates.
 - [ ] Owner sign-off: **ready for RFC**.
 
 ### Owner-resolved v1 decisions
@@ -1172,6 +1277,15 @@ identity, permissions, capacity, and operational guardrails. `wal2json` is only
 needed for consumers that deliberately choose its JSON output format; the
 PeerDB and Debezium reference paths can use `pgoutput`.
 
+**Why not use a PostgreSQL analytical extension for v1?**
+
+The platform already operates ClickHouse, while the authoritative facts live
+in three separate PostgreSQL databases. An extension would keep analytical
+resource pressure inside CNPG and still need a cross-database semantic and
+publication layer. The [extension comparison](#postgresql-analytical-extensions)
+records when `pg_duckdb`, `pg_mooncake`, TimescaleDB, or supporting extensions
+would become a better fit without reopening the simple v1 direction now.
+
 **Why no customer cohorts?**
 
 They require a customer analytical identity and privacy/retention model. The
@@ -1198,6 +1312,14 @@ access to every dataset and operation.
 - [ClickHouse incremental materialized views](https://clickhouse.com/docs/concepts/features/materialized-views)
 - [ClickHouse MaterializedPostgreSQL database engine](https://clickhouse.com/docs/reference/engines/database-engines/materialized-postgresql)
 - [ClickHouse PostgreSQL + ClickHouse open-source stack](https://clickhouse.com/blog/postgres-clickhouse-oss)
+- [`pg_duckdb` source and compatibility](https://github.com/duckdb/pg_duckdb)
+- [`pg_mooncake` source, architecture, and limitations](https://github.com/Mooncake-Labs/pg_mooncake)
+- [TimescaleDB continuous aggregates](https://docs.timescale.com/use-timescale/latest/continuous-aggregates/)
+- [`pg_ivm` incremental view maintenance](https://github.com/sraoss/pg_ivm)
+- [`pg_cron` database scheduler](https://github.com/citusdata/pg_cron)
+- [`pg_partman` partition management](https://github.com/pgpartman/pg_partman)
+- [Citus documentation](https://docs.citusdata.com/en/stable/)
+- [ParadeDB 0.15.15 removal of `pg_analytics`](https://docs.paradedb.com/changelog/0.15.15)
 - [PeerDB PostgreSQL → ClickHouse CDC setup](https://docs.peerdb.io/mirror/cdc-pg-clickhouse)
 - [PeerDB ClickHouse data-modeling guidance](https://docs.peerdb.io/bestpractices/clickhouse_datamodeling)
 - [PeerDB self-hosted Kubernetes architecture](https://github.com/PeerDB-io/peerdb-enterprise)
@@ -1215,11 +1337,13 @@ access to every dataset and operation.
 - [CloudNativePG replication and logical slot synchronization](https://cloudnative-pg.io/docs/devel/replication/)
 - [Altinity operator security hardening](https://github.com/Altinity/clickhouse-operator/blob/master/docs/security_hardening.md)
 - [CloudNativePG 1.30 declarative role management](https://cloudnative-pg.io/docs/1.30/declarative_role_management/)
+- [CloudNativePG 1.30 Service management](https://cloudnative-pg.io/docs/1.30/service_management/)
 - [Recharts API](https://recharts.github.io/en-US/api/)
 - [Recharts 3.10.1 package metadata](https://github.com/recharts/recharts/blob/v3.10.1/package.json)
 - [shadcn chart component](https://ui.shadcn.com/docs/components/chart)
 - [TanStack Router search parameters](https://tanstack.com/router/latest/docs/framework/react/guide/search-params)
 - [TanStack Query query cancellation](https://tanstack.com/query/latest/docs/framework/react/guides/query-cancellation)
+- [Context7 CLI](https://github.com/upstash/context7/blob/master/packages/cli/README.md)
 
 ### Repository evidence
 
@@ -1230,6 +1354,7 @@ access to every dataset and operation.
 - [Admin consumer contract](../../../api/admin.md)
 - [Admin Portal platform guide](../../../frontend/admin-portal/README.md)
 - [ClickHouse platform guide](../../../observability/clickhouse/README.md)
+- [PostgreSQL extensions guide](../../../databases/extensions.md)
 - [`product-db` cluster](../../../../kubernetes/infra/configs/databases/clusters/product-db/instance.yaml)
 - [ClickHouse installation](../../../../kubernetes/infra/configs/clickhouse/clickhouseinstallation.yaml)
 
@@ -1246,37 +1371,22 @@ access to every dataset and operation.
 
 ## Context7 audit log
 
-Context7 is not exposed by the current tool session. Primary official sources
-were read directly to prevent the research from being empty, but that is not
-represented as a completed Context7 audit. MVP-critical rows stay **pending**.
-Rejected-alternative and future-CDC rows are explicitly deferred to the later
-CDC ADR review and do not count as completed Context7 work.
+The audit ran on 2026-09-07 with the official `ctx7` CLI because a Context7 MCP
+tool was not attached to this session. Context7 libraries usually track an
+upstream branch rather than the exact deployed version, so every version-bound
+claim was also checked against the official 26.7, 1.30, or package-version
+source linked above. Context7 confirms mechanics; it does not replace the
+acceptance benchmark or adoption-time compatibility tests.
 
-| Claim / section | Source to check | Result |
-|-----------------|-----------------|--------|
-| ReplacingMergeTree dedup is merge-time and query correctness needs explicit dedup | ClickHouse 26.7 engine + dedup docs | pending Context7 |
-| `argMax` vs `FINAL` behavior and cost | ClickHouse 26.7 query/engine docs | pending Context7; `argMax` selected, smoke benchmark at RFC acceptance |
-| TTL expiry is applied by merges and may outlive the logical query window | ClickHouse 26.7 TTL docs | pending Context7 |
-| Batch insert sizing and acknowledgement | ClickHouse 26.7 insert strategy | pending Context7 |
-| Incremental MV sees inserted blocks, not later source-table change | ClickHouse 26.7 MV docs | deferred — rejected alternative |
-| Refreshable MV replacement/replication semantics | ClickHouse 26.7 refreshable MV docs | deferred — rejected alternative |
-| Users/roles/profiles/quotas and `default` account behavior | ClickHouse 26.7 access docs | pending Context7 |
-| CHI secret-backed users and grant rendering | Altinity operator 0.27.3 | pending Context7 |
-| DatabaseRole is namespace-scoped and reconciles on spec/Secret change | CNPG 1.30 role docs | pending Context7 |
-| DatabaseRole does not own PostgreSQL object grants | CNPG 1.30 API/docs | pending Context7 |
-| Publications are database-local and cannot publish views | PostgreSQL 18 logical replication docs | deferred — future CDC ADR |
-| Publication column lists are not a security boundary | PostgreSQL 18 column-list/security docs | deferred — future CDC ADR |
-| Logical slots can retain unbounded WAL unless capped | PostgreSQL 18 settings + CNPG replication docs | deferred — future CDC ADR |
-| CNPG synchronizes logical decoding slots across failover candidates | CNPG 1.30/development replication docs | deferred — future CDC ADR + failover prototype |
-| PeerDB initial snapshot, WAL mirrors, version columns, and tombstones | PeerDB current mirror/data-modeling docs | deferred — future CDC ADR + prototype |
-| PeerDB Kubernetes deployment needs workers, catalog, API, and Temporal | PeerDB self-hosted Helm docs | deferred — future CDC ADR + chart audit |
-| PeerDB ClickHouse ingestion requires object storage staging and cleanup controls | PeerDB source/deployment docs | deferred — future CDC ADR + prototype |
-| PeerDB compatibility, license, release, and schema-change behavior | PeerDB current release/source docs | deferred — future CDC ADR + adoption-time revalidation |
-| Debezium can use built-in `pgoutput` but requires a distinct slot per connector | Debezium stable PostgreSQL connector docs | deferred — future CDC ADR |
-| MaterializedPostgreSQL is experimental and does not replicate DDL | ClickHouse 26.7 engine docs | deferred — rejected alternative |
-| Search params remain URL-owned in the existing frontend stack | TanStack Router current docs | pending Context7 |
-| Query cancellation consumes AbortSignal | TanStack Query current docs | pending Context7 |
-| Recharts accessibility and React 19 support | Recharts current docs/package peer range | pending Context7 |
+| Area | Context7 library | Audit outcome |
+|------|------------------|---------------|
+| ClickHouse | `/websites/clickhouse` | Confirmed merge-time `ReplacingMergeTree` dedup, query-time `FINAL`, TTL-on-merge behavior, access entities, materialized-view boundaries, and insert guidance of at least 1,000 rows, ideally 10,000–100,000. `argMax` performance remains a homelab benchmark claim. |
+| Altinity operator | `/altinity/clickhouse-operator` | Confirmed CHI users/profiles/quotas and `valueFrom.secretKeyRef`; corrected the document to avoid treating CHI as an exact object-grant controller or assuming Secret-only rollout behavior. Exact chart 0.27.3 behavior remains an acceptance test. |
+| CloudNativePG | `/cloudnative-pg/cloudnative-pg` | Confirmed namespace scope, reconciliation on resource/Secret changes, and lack of object-grant management. Corrected the document to state that direct role drift is not continuously detected and to name the `product-db-ro` replica Service. Exact 1.30 details use the versioned docs. |
+| PostgreSQL analytics | `/duckdb/pg_duckdb`, `/mooncake-labs/pg_mooncake`, `/timescale/timescaledb`, `/websites/citusdata_en_v13_0`, `/hydradatabase/columnar-docs` | Audited and retained as alternatives only. None removes the cross-database semantic boundary, and each adds native artifacts, topology change, or OLTP resource coupling. |
+| PeerDB | `/peerdb-io/peerdb`, `/peerdb-io/peerdb-enterprise` | Confirmed snapshot/CDC architecture, version/tombstone model and multi-component Kubernetes footprint. Added the three-mirror lifecycle, staging/catalog/Temporal bill of materials, resource-baseline warning, and adoption-time license/version/prototype gates. |
+| TanStack | `/websites/tanstack_router`, `/tanstack/query` | Confirmed typed URL search and `AbortSignal` cancellation when the query function consumes the signal. |
+| Recharts | `/websites/recharts_github_io`, `/recharts/recharts` | Confirmed responsive and accessibility primitives. Exact 3.10.1 compatibility is pinned to its package metadata; the 10 KiB gzip limit remains a measured product acceptance target. |
 
 ---
 
@@ -1287,8 +1397,9 @@ CDC ADR review and do not count as completed Context7 work.
 - [x] Multiple plausible integration and product alternatives carry explicit costs
 - [x] Platform as-built section is grounded in manifests, trusted API docs, and source migrations
 - [x] Primary candidate is stated without declaring an architecture decision accepted
-- [ ] Context7 audit complete; every pending row confirmed/corrected/rejected
-- [x] Five Mermaid diagrams distinguish deployed from reference components
+- [x] Context7 audit complete; every row confirmed, corrected, rejected, or
+      explicitly retained behind a version/prototype gate
+- [x] Six Mermaid diagrams distinguish deployed from reference components
 - [x] No Kubernetes manifest or application implementation is included
 - [x] No customer PII or payment credential is proposed for export
 - [x] `argMax` selected for v1; one-million-fact smoke benchmark moved to RFC acceptance
@@ -1296,4 +1407,5 @@ CDC ADR review and do not count as completed Context7 work.
 - [ ] Owner sign-off: **ready for RFC**
 
 ---
-_Last verified: 2026-09-06 (official docs + manifest/source cross-check; Context7 pending)._
+_Last verified: 2026-09-07 (Context7 CLI audit + official versioned docs and
+manifest/source cross-check)._
