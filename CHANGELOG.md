@@ -121,6 +121,17 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **`otel_logs` and `otel_traces` move to the cold tier after 7 days** (3 of 4):
+  `TTL ... + 7 d TO VOLUME 'cold', ... + 90 d` and `storage_policy = 'hot_cold'`
+  in the schema DDL, in the server's normalised form so `SHOW CREATE TABLE`
+  reads back what the file says. Fresh-only by decision — no migration path; a
+  pre-tier cluster is rebuilt by `make up`. The schema Job gains a preflight
+  that refuses to start until every replica has the policy, and verify asserts
+  2 tiered tables and both S3 disks. `otel_traces_trace_id_ts` stays on
+  `default` (three narrow columns, the random-access lookup every trace-by-id
+  starts with). `make validate` gains one guard: the two RustFS bucket lists
+  must agree.
+
 - **ClickHouse gets an S3 disk on RustFS and a `hot_cold` storage policy**
   (`03-storage-rustfs.xml` on the CHI; 2 of 4). Disk `s3` at
   `rustfs-svc.rustfs.svc.cluster.local:9000/clickhouse-otel/{replica}/` with

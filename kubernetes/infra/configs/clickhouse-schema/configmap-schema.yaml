@@ -31,6 +31,20 @@
 # INSERT statements (upstream logs_insert.sql / traces_insert.sql at the pinned
 # collector version) — a mismatch is a runtime insert failure under traffic, not
 # an apply-time error, so nothing in CI would catch it.
+#
+# Cold tier (2026-09-07, owner decision, no RFC). otel_logs and otel_traces
+# carry `TTL ... + 7 days TO VOLUME 'cold', ... + 90 days` and
+# `storage_policy = 'hot_cold'` (the policy lives in the CHI's
+# 03-storage-rustfs.xml). Both tails are written in the server's normalised
+# form — no `DELETE` keyword, storage_policy last in SETTINGS — so SHOW CREATE
+# TABLE reads back exactly what this file says. otel_traces_trace_id_ts stays on
+# `default` on purpose: three narrow columns and the random-access lookup every
+# trace-by-id query starts with — putting it on S3 would cost a RustFS
+# round-trip per lookup for no space gain. The MV owns no storage.
+#
+# Fresh-only, by decision: the CREATEs are IF NOT EXISTS and never touch a live
+# table, and there is no migration path. A cluster built before the tier is
+# rebuilt by `make up`, the same rule RFC-0028 set for the replicated rollout.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -95,8 +109,8 @@ data:
     ENGINE = ReplicatedMergeTree
     PARTITION BY toDate(Timestamp)
     ORDER BY (toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp)
-    TTL toDateTime(Timestamp) + toIntervalDay(90)
-    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    TTL toDateTime(Timestamp) + toIntervalDay(7) TO VOLUME 'cold', toDateTime(Timestamp) + toIntervalDay(90)
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1, storage_policy = 'hot_cold';
 
   20-otel_traces.sql: |
     CREATE TABLE IF NOT EXISTS otel.otel_traces
@@ -133,8 +147,8 @@ data:
     ENGINE = ReplicatedMergeTree
     PARTITION BY toDate(Timestamp)
     ORDER BY (ServiceName, SpanName, toDateTime(Timestamp))
-    TTL toDateTime(Timestamp) + toIntervalDay(90)
-    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+    TTL toDateTime(Timestamp) + toIntervalDay(7) TO VOLUME 'cold', toDateTime(Timestamp) + toIntervalDay(90)
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1, storage_policy = 'hot_cold';
 
   30-otel_traces_trace_id_ts.sql: |
     CREATE TABLE IF NOT EXISTS otel.otel_traces_trace_id_ts
@@ -170,4 +184,3 @@ data:
     FROM otel.otel_traces
     WHERE TraceId != ''
     GROUP BY TraceId;
-

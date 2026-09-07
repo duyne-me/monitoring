@@ -362,8 +362,30 @@ validate_yaml_syntax
 validate_standalone_manifests
 validate_kustomize_overlays
 validate_worker_versioning
+# The RustFS bucket list lives in two places -- the run-once setup Job and the
+# 30-minute CronJob -- and the Job's header says to keep them in step. Nothing
+# did until now.
+validate_rustfs_bucket_lists() {
+  echo "INFO - Validating RustFS bucket lists agree"
+  local job="kubernetes/infra/controllers/storage/rustfs/job-setup-buckets.yaml"
+  local cron="kubernetes/infra/controllers/storage/rustfs/helmrelease-cronjobs.yaml"
+  if [[ ! -f "$job" || ! -f "$cron" ]]; then
+    echo "  SKIP - RustFS bucket manifests not found"
+    return 0
+  fi
+  local a b
+  a=$(grep -ohE 'BUCKETS="[^"]*"' "$job" | head -1)
+  b=$(grep -ohE 'BUCKETS="[^"]*"' "$cron" | head -1)
+  if [[ -z "$a" || "$a" != "$b" ]]; then
+    echo "ERROR - RustFS bucket lists differ: ${job} has ${a:-<none>}, ${cron} has ${b:-<none>}" >&2
+    exit 1
+  fi
+  echo "  ${a}"
+}
+
 validate_kyverno_policies
 validate_clickhouse_embedded_xml
 validate_clickhouse_replica_count
+validate_rustfs_bucket_lists
 validate_production
 echo "INFO - All validations passed"

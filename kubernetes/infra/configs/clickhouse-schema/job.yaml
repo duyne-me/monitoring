@@ -169,6 +169,17 @@ spec:
                 exit 1
               fi
 
+              # The cold tier's storage policy comes from the CHI
+              # (03-storage-rustfs.xml). A CREATE naming a policy the server
+              # does not have fails, and so would the ALTERs below, so refuse
+              # to start until every replica has finished rolling onto it.
+              echo "==> preflight: storage policy hot_cold on every replica"
+              for h in $HOSTS; do
+                np=$(cli "$h.monitoring.svc.cluster.local" -q \
+                  "SELECT count() FROM system.storage_policies WHERE policy_name='hot_cold' AND volume_name IN ('hot','cold') FORMAT TSV" 2>/dev/null || echo 0)
+                [ "$np" = "2" ] || { echo "FAIL: $h lacks storage policy hot_cold with volumes hot+cold. Has the operator finished rolling the CHI?"; exit 1; }
+              done
+
               echo "==> CREATE DATABASE on each replica (no ON CLUSTER, no DDL queue)"
               for h in $HOSTS; do
                 cli "$h.monitoring.svc.cluster.local" --queries-file /sql/00-database.sql
@@ -204,9 +215,15 @@ spec:
                 [ "$bad" = "0" ] || { echo "FAIL: $h has $bad replicated tables not at ${EXPECTED}/${EXPECTED} or read-only"; rc=1; }
                 plain=$(cli "$host" -q "SELECT count() FROM system.tables WHERE database='otel' AND engine='MergeTree' FORMAT TSV")
                 [ "$plain" = "0" ] || { echo "FAIL: $h has $plain unreplicated MergeTree tables in otel"; rc=1; }
-                echo "    $h: engine=$eng replicated_tables_ok=$([ "$bad" = 0 ] && echo yes || echo NO)"
+                tiered=$(cli "$host" -q "SELECT count() FROM system.tables WHERE database='otel' AND name IN ('otel_logs','otel_traces') AND storage_policy='hot_cold' AND position(create_table_query,'TO VOLUME') > 0 FORMAT TSV")
+                [ "$tiered" = "2" ] || { echo "FAIL: $h has $tiered/2 tables on hot_cold with a cold-volume TTL"; rc=1; }
+                disks=$(cli "$host" -q "SELECT count() FROM system.disks WHERE name IN ('s3','s3_cache') FORMAT TSV")
+                [ "$disks" = "2" ] || { echo "FAIL: $h lacks disks s3/s3_cache"; rc=1; }
+                echo "    $h: engine=$eng replicated_tables_ok=$([ "$bad" = 0 ] && echo yes || echo NO) tiered=$tiered/2"
               done
               [ "$rc" -eq 0 ] || { echo "SCHEMA BOOTSTRAP FAILED"; exit 1; }
+
+              cli "$LB" -q "SELECT table, disk_name, count() AS parts, formatReadableSize(sum(bytes_on_disk)) AS on_disk FROM system.parts WHERE database='otel' AND active GROUP BY table, disk_name ORDER BY table, disk_name FORMAT PrettyCompact"
 
               cli "$LB" -q "SELECT table, is_readonly, total_replicas, active_replicas FROM system.replicas WHERE database='otel' ORDER BY table FORMAT PrettyCompact"
               echo "==> schema bootstrap complete on $EXPECTED replicas"
