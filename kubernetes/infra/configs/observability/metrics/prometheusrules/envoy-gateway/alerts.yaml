@@ -154,6 +154,121 @@ spec:
             description: "One or more endpoints of {{ $labels.envoy_cluster_name }} were ejected by health checking or outlier detection. The route degrades to fewer replicas; if all endpoints eject, requests answer 503/UH."
             runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/envoy-gateway/EdgeUpstreamUnhealthy.md"
 
+        # The terminal state of EdgeUpstreamUnhealthy: every endpoint of a
+        # cluster is out of rotation, so the route answers 503 with response
+        # flag UH on every request. Split from the warning above rather than
+        # folded into it because the two need different urgency — one ejected
+        # replica is a ticket, zero healthy replicas is a page — and one rule
+        # carries one severity. `membership_total > 0` excludes a cluster whose
+        # HTTPRoute points at a Service with no endpoints at all (a service not
+        # yet deployed): that is a configuration state, reads as 503/NC, and
+        # Edge5xxRatio owns it.
+        # Audit source (2026-09-08): awesome-prometheus-alerts
+        # EnvoyClusterMembershipEmpty, re-keyed on envoy_cluster_name and
+        # job="envoy-gateway" per this file's convention.
+        # VERIFY-AT-KIND: unthresholded, both gauges return one series per
+        # cluster; complete, returns nothing while every service is up.
+        - alert: EdgeUpstreamNoHealthyEndpoints
+          expr: |
+            sum by (envoy_cluster_name) (envoy_cluster_membership_healthy{job="envoy-gateway"}) == 0
+            and
+            sum by (envoy_cluster_name) (envoy_cluster_membership_total{job="envoy-gateway"}) > 0
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: "Envoy cluster {{ $labels.envoy_cluster_name }} has no healthy endpoints"
+            description: "Every endpoint of {{ $labels.envoy_cluster_name }} is out of rotation — ejected by active health checks or passive outlier detection. The route answers 503/UH on every request until one endpoint recovers. EdgeUpstreamUnhealthy fired first; this is the state it warned about."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/envoy-gateway/EdgeUpstreamNoHealthyEndpoints.md"
+
+        # Upstream request timeouts as a ratio of completed upstream requests,
+        # per cluster. Every BackendTrafficPolicy in policies/btp-api.yaml sets
+        # timeout.http.requestTimeout: 15s; when a backend crosses it the edge
+        # answers 504 with response flag UT. Edge5xxRatio counts those, but
+        # only once enough of the WHOLE edge fails to clear 5%, and without
+        # naming the route. The checkout CPU-limit incident is this alert in
+        # the negative: a 50m limit throttled one service past 15s, the edge
+        # served 504/UT on that route alone, and the platform-wide 5xx ratio
+        # never tripped. Divided by upstream_rq_completed rather than the
+        # downstream total so a small route is judged against its own traffic,
+        # and the `and` arm (>0.05 req/s, ~3/min) keeps a near-idle route from
+        # paging on one slow request.
+        # Audit source (2026-09-08): awesome-prometheus-alerts
+        # EnvoyHighClusterUpstreamRequestTimeoutRate — ours adds the job
+        # filter, the per-cluster key and the traffic guard; `for` 10m instead
+        # of 5m so a single slow deploy rollout does not page.
+        # VERIFY-AT-KIND: envoy_cluster_upstream_rq_timeout should return one
+        # series per envoy_cluster_name at rest (cluster counters are
+        # initialised at 0, unlike the filter counters born on first event) —
+        # confirm, because a ratio over an absent numerator never fires.
+        - alert: EdgeUpstreamTimeoutRatioHigh
+          expr: |
+            (
+              sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_timeout{job="envoy-gateway"}[5m]))
+              /
+              sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_completed{job="envoy-gateway"}[5m]))
+            ) > 0.05
+            and
+            sum by (envoy_cluster_name) (rate(envoy_cluster_upstream_rq_completed{job="envoy-gateway"}[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+            category: latency
+          annotations:
+            summary: "More than 5% of upstream requests to {{ $labels.envoy_cluster_name }} time out"
+            description: "{{ $value | humanizePercentage }} of upstream requests to {{ $labels.envoy_cluster_name }} hit the 15s BackendTrafficPolicy requestTimeout (threshold 5% for 10m). Clients see 504/UT on that route while the edge-wide 5xx ratio may still look fine. Check the backend's own latency and CPU throttling before touching the timeout."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/envoy-gateway/EdgeUpstreamTimeoutRatioHigh.md"
+
+    # --- TLS (cert-manager Certificate -> Secret -> SDS -> listener :443) ---
+    - name: envoy-gateway-tls
+      interval: 1m
+      rules:
+        # The certificate the fleet is ACTUALLY SERVING, read from the proxy.
+        # cert-manager's alerts (gitops/cert-manager-alerts.yaml) watch the
+        # Certificate resource and fire when RENEWAL fails. They cannot see the
+        # last hop: the renewed Secret reaches the proxy through the
+        # controller's SDS push, and if that stalls — controller down, xDS
+        # snapshot failing, a proxy that never picked up the new secret — the
+        # Certificate reads Ready while the listener serves the old cert to its
+        # last day. envoy_server_days_until_first_cert_expiring is the minimum
+        # over every certificate the server has loaded, SDS-delivered included.
+        # Sized off configs/envoy-gateway/certificate.yaml — 90-day duration,
+        # renewBefore 15 days — so a healthy edge never reads below ~15, and 7
+        # means renewal or the push has been broken for over a week. `for: 1h`
+        # because the gauge moves once a day; there is nothing to debounce.
+        # The gauge is an unsigned day count and reads 0 for a cert that has
+        # already expired, so the audit source's `< 0` form can never fire —
+        # the critical uses `< 1`.
+        # Audit source (2026-09-08): awesome-prometheus-alerts
+        # EnvoySSLCertificateExpiringSoon / EnvoySSLCertificateExpired.
+        # VERIFY-AT-KIND: read the gauge (expected 75-90 on a fresh Kind) and
+        # confirm it tracks the SDS cert by comparing with the Certificate's
+        # notAfter (`kubectl -n envoy-gateway get certificate -o yaml`). If a
+        # shorter-lived CA bundle is ever loaded for validation, the minimum
+        # will follow it instead — that is a feature, but know which cert it is.
+        - alert: EdgeCertExpiringSoon
+          expr: min(envoy_server_days_until_first_cert_expiring{job="envoy-gateway"}) < 7
+          for: 1h
+          labels:
+            severity: warning
+            category: availability
+          annotations:
+            summary: "Envoy Gateway is serving a certificate that expires in under 7 days"
+            description: "The proxy fleet's soonest-expiring loaded certificate has {{ $value | humanize }} days left. cert-manager renews 15 days ahead, so either renewal failed (check CertManagerCertNotReady) or the renewed Secret has not reached the proxies over SDS (check the controller). When it reaches 0 every HTTPS client fails the handshake."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/envoy-gateway/EdgeCertExpiry.md"
+
+        - alert: EdgeCertExpired
+          expr: min(envoy_server_days_until_first_cert_expiring{job="envoy-gateway"}) < 1
+          for: 15m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: "Envoy Gateway is serving a certificate that expires today or has expired"
+            description: "The proxy fleet's soonest-expiring loaded certificate is within its last day (the gauge floors at 0 once expired). HTTPS clients start rejecting the edge — the SPA and every API call over :443. EdgeCertExpiringSoon should have fired a week ago; if it did not, the metric or the scrape is the second problem."
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/envoy-gateway/EdgeCertExpiry.md"
+
     # --- Edge auth (SecurityPolicy JWT via Keycloak remoteJWKS) ---
     - name: envoy-gateway-auth
       interval: 1m

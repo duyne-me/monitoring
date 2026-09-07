@@ -26,12 +26,20 @@ alert name.
 | ClickHouseKeeperQuorumDegraded | warning | homelab | active | [ClickHouseKeeperQuorumDegraded.md](ClickHouseKeeperQuorumDegraded.md) |
 | ClickHouseZooKeeperExceptions | warning | homelab | active | [ClickHouseZooKeeperExceptions.md](ClickHouseZooKeeperExceptions.md) |
 | ClickHouseReadonlyReplica | warning | homelab | active | [ClickHouseReadonlyReplica.md](ClickHouseReadonlyReplica.md) |
+| ClickHouseKeeperSessionLost | warning | homelab | active — VERIFY-AT-KIND | [ClickHouseKeeperSessionLost.md](ClickHouseKeeperSessionLost.md) |
+| ClickHouseReplicationLag | warning | homelab | active — VERIFY-AT-KIND | [ClickHouseReplicationLag.md](ClickHouseReplicationLag.md) |
+| ClickHouseReplicatedDataLoss | critical | homelab | active — VERIFY-AT-KIND | [ClickHouseReplicatedDataLoss.md](ClickHouseReplicatedDataLoss.md) |
 | ClickHouseDiskAlmostFull | warning | homelab | active | [ClickHouseDiskAlmostFull.md](ClickHouseDiskAlmostFull.md) |
 | ClickHouseDiskCritical | critical | homelab | active | [ClickHouseDiskCritical.md](ClickHouseDiskCritical.md) |
 | ClickHouseTooManyParts | warning | homelab | active | [ClickHouseTooManyParts.md](ClickHouseTooManyParts.md) |
+| ClickHouseTooManyPartsPerPartition | warning | homelab | active — VERIFY-AT-KIND | [ClickHouseTooManyPartsPerPartition.md](ClickHouseTooManyPartsPerPartition.md) |
 | ClickHouseInsertsDelayed | info | homelab | active | [ClickHouseInsertsDelayed.md](ClickHouseInsertsDelayed.md) |
+| ClickHouseInsertsRejected | warning | homelab + compose | active — VERIFY-AT-KIND | [ClickHouseInsertsRejected.md](ClickHouseInsertsRejected.md) |
+| ClickHouseInsertsFailing | warning | homelab + compose | active — VERIFY-AT-KIND | [ClickHouseInsertsFailing.md](ClickHouseInsertsFailing.md) |
 | ClickHouseServerErrorsElevated | info | homelab | active | [ClickHouseServerErrorsElevated.md](ClickHouseServerErrorsElevated.md) |
+| ClickHouseS3Errors | warning | homelab | active — VERIFY-AT-KIND | [ClickHouseS3Errors.md](ClickHouseS3Errors.md) |
 | ClickHouseExporterUnhealthy | warning | homelab | active | [ClickHouseExporterUnhealthy.md](ClickHouseExporterUnhealthy.md) |
+| ClickHouseServerNotScraped | warning | homelab | active — VERIFY-AT-KIND | [ClickHouseServerNotScraped.md](ClickHouseServerNotScraped.md) |
 | ClickHouseOperatorDown | warning | homelab | active | [ClickHouseOperatorDown.md](ClickHouseOperatorDown.md) |
 | ClickHouseOperatorReconcileErrors | warning | homelab | active | [ClickHouseOperatorReconcileErrors.md](ClickHouseOperatorReconcileErrors.md) |
 
@@ -184,4 +192,4 @@ Diagnosis → Mitigation → Escalation). In this folder the Diagnosis section l
 with a `clickhouse-client` block, then `### PromQL`.
 
 ---
-_Last updated: 2026-09-07 — folder README created; the 14 per-alert files existed since 2026-09-05 with no index. Investigation workflows distilled from the #1025 live audit_
+_Last updated: 2026-09-08 — seven runbooks added from the awesome-prometheus-alerts audit (`ServerNotScraped`, `TooManyPartsPerPartition`, `InsertsRejected`, `InsertsFailing`, `ReplicationLag`, `KeeperSessionLost`, `ReplicatedDataLoss`), and the index gained the `ClickHouseS3Errors` row it had been missing since 2026-09-07; 15 → 22 rules, every new one marked VERIFY-AT-KIND until its two-form pass runs on Kind. Previously 2026-09-07 — folder README created; the 14 per-alert files existed since 2026-09-05 with no index. Investigation workflows distilled from the #1025 live audit_

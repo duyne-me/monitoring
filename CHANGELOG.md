@@ -121,6 +121,38 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **Envoy and ClickHouse alert groups audited against awesome-prometheus-alerts;
+  11 rules adopted, 22 declined with reasons.** The community Envoy (20) and
+  ClickHouse (23) sets were mapped rule by rule against `prometheusrules/envoy-gateway/alerts.yaml`
+  and `prometheusrules/observability/clickhouse-alerts.yaml`. Envoy gains
+  `EdgeUpstreamNoHealthyEndpoints` (critical — the zero-healthy end state
+  `EdgeUpstreamUnhealthy` only warned about), `EdgeUpstreamTimeoutRatioHigh`
+  (per-route 504/UT against the 15s BTP `requestTimeout`; the checkout CPU-limit
+  incident never moved the edge-wide 5xx ratio) and `EdgeCertExpiringSoon` /
+  `EdgeCertExpired` on the certificate the fleet is *serving* — cert-manager's
+  alerts cannot see a renewed Secret that never reached the proxies over SDS
+  (upstream's `< 0` critical can never fire on Envoy's unsigned day gauge; ours
+  is `< 1`). ClickHouse gains seven on the per-pod `:9363` scrape:
+  `ClickHouseServerNotScraped` (the `absent()` guard ten rules were missing —
+  they would have gone silent together and reported healthy),
+  `ClickHouseTooManyPartsPerPartition` (the dimension the insert guards enforce;
+  the rule comment that said "default 300 per partition throws" was stale and
+  now points at `system.merge_tree_settings`), `ClickHouseInsertsRejected` +
+  `ClickHouseInsertsFailing` (the 2026-08-28 follow-up, restored from the compose
+  twin on ProfileEvents the server publishes at zero), `ClickHouseReplicationLag`
+  (`ReplicasMaxAbsoluteDelay` — the one replicated-topology signal the group had
+  none of), `ClickHouseKeeperSessionLost` and `ClickHouseReplicatedDataLoss`.
+  Declined and why: heap/cgroup memory duplicate `KubePodMemoryNearLimit`; Envoy
+  connection-overflow and circuit-breaker counters read 0 because neither is
+  configured; generic 4xx ratios are client noise at an API edge; no
+  `Distributed` tables and no `insert_quorum` on this CHI; interserver/TCP/network
+  thresholds are capacity noise at three replicas. Ten runbooks, both folder
+  READMEs, catalog §2 + §8b rows and Summary (re-derived to 243; envoy-gateway
+  16, observability 25, and `postgres 55` found stale at 58). Every new rule
+  carries `VERIFY-AT-KIND` and none has had the two-form pass yet — the Kind
+  cluster was not the active context during the audit — so they count as
+  coverage the way `ClickHouseS3Errors` did the day before: on the marker, not
+  on a measurement.
 - **The cold tier gets its observability and its docs** (4 of 4).
   `ClickHouseS3Errors` (warning, `max by (replica)` on the per-code
   `ClickHouseErrorMetric_S3_ERROR` series from `:9363`) with a runbook that
