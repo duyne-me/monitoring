@@ -301,6 +301,16 @@ Skeleton (copy what you need):
 
 #### Docs
 
+- **New: [`docs/observability/runbooks/clickhouse/README.md`](docs/observability/runbooks/clickhouse/README.md)** —
+  the ClickHouse alert group had 14 per-alert runbooks since 2026-09-05 and no
+  folder index, no row in the runbook hub, and no `Per-alert runbooks:` line in
+  alert-catalog § 8b. The README adds the index, the four-producer label table
+  (`hostname` vs `replica` vs `pod`), the node-vs-PVC disk note, and four
+  investigation workflows distilled from the #1025 live audit: is TTL keeping up
+  (partition age, `TTLDeleteMerge` count, pool size 2 vs TTL cap 2), merge memory
+  by column count, `_log_[0-9]+$` leftovers after an engine change, and which
+  disk an alert measures. The runbook tree in `docs/observability/README.md`
+  listed 5 of 13 folders; it now lists all of them with re-counted files.
 - **New: [`docs/platform/worker-autoscaling.md`](docs/platform/worker-autoscaling.md)** —
   written from the ADR-055 Kind drill, for a reader who has to operate this rather
   than re-derive it. Six sections, each one a mistake that was actually made and

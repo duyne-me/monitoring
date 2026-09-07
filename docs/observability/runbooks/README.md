@@ -13,16 +13,17 @@ runbook links it via its `runbook_url` annotation.
 | [PostgreSQL runbooks](postgresql/README.md) | Per-alert CNPG runbooks (chart + deep-signal), 33 files, + the [plan-regression investigation workflow](postgresql/plan-regression-investigation.md) | On-call, when a PostgreSQL/CNPG alert fires — or a query got slower and you need the plan it ran at the time |
 | [Kubernetes runbooks](kubernetes/README.md) | Per-alert investigation for pods, workloads, storage, nodes, API server, network (21 files) | On-call, when a Kubernetes infra alert fires |
 | [Valkey runbooks](valkey/README.md) | Per-alert investigation for the cache (7 files) | On-call, when a Valkey alert fires |
+| [ClickHouse runbooks](clickhouse/README.md) | Per-alert investigation for the OTel OLAP store — reachability, Keeper quorum, disk, insert pressure, operator (14 files) + TTL / merge-memory / `_N` leftover workflows | On-call, when a `ClickHouse*` alert fires — or a table is past its TTL window |
 | [Kyverno runbooks](kyverno/README.md) | Per-alert investigation for the admission webhook (4 files) | On-call, when a Kyverno alert fires |
 | [Temporal runbooks](temporal/README.md) | Per-alert investigation for the server, the versioned workers and the KEDA scaler that sizes them (9 files covering 10 rules) | On-call, when a Temporal alert fires |
 | [KEDA runbooks](keda/README.md) | Per-alert investigation for the autoscaler's own health — operator scrape, external-metrics adapter scrape, scaler and ScaledObject errors (4 files) | On-call, when a `Keda*` alert fires |
 | [Keycloak runbooks](keycloak/) | Per-alert investigation for the identity provider (5 files, no folder README yet) | On-call, when a Keycloak alert fires |
 | [Logging troubleshooting](../logging/vector.md#troubleshooting) | Missing/blank Kubernetes logs (Vector → VictoriaLogs → Grafana) | On-call, when logs are missing in Grafana |
 
-Not yet covered by per-alert runbooks (a recorded gap): Flux/GitOps,
-cert-manager, and observability-stack self-monitoring alerts — they
-carry no `runbook_url`; the [alert catalog](../alerting/alert-catalog.md)
-documents their severity and impact.
+Not yet covered by per-alert runbooks (a recorded gap): cert-manager alerts —
+they carry no `runbook_url`; the [alert catalog](../alerting/alert-catalog.md)
+documents their severity and impact. (`gitops/`, `observability/` and
+`victoriametrics/` folders exist but have no row here yet.)
 
 ## Runbook placement
 
@@ -54,4 +55,4 @@ Domain-specific rows and diagnosis dialects live in each folder README's
 - [Prepared Databases](../../databases/reference/zalando/prepared-databases.md) -- preparedDatabases issue runbook
 
 ---
-_Last updated: 2026-09-05 — KEDA folder added (3 runbooks, ADR-055); Temporal folder indexed (it had 7 runbooks and no row here); two capacity runbooks added with ADR-055. Previously 2026-08-19 — infrastructure-alerts.md split into kubernetes/ + valkey/; one canonical template_
+_Last updated: 2026-09-07 — ClickHouse folder indexed (14 runbooks existed since 2026-09-05 with no row here). Previously 2026-09-05 — KEDA folder added (3 runbooks, ADR-055); Temporal folder indexed (it had 7 runbooks and no row here); two capacity runbooks added with ADR-055. Previously 2026-08-19 — infrastructure-alerts.md split into kubernetes/ + valkey/; one canonical template_
