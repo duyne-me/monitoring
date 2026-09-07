@@ -230,8 +230,22 @@ different places — two of which this platform does not own.
 |---|---|---|---|
 | `query_log`, `part_log` | daily (`event_date`) | 30 d | Altinity operator, via `config.d/01-clickhouse-0{3,4}-*.xml` |
 | `trace_log` | daily (`event_date`) | **7 d** | operator sets 30 d; **this repo overrides it** — `02-` loads after `01-`, see below |
-| `processors_profile_log`, `aggregated_zookeeper_log`, `zookeeper_connection_log` | monthly | 30 d | ClickHouse upstream default |
+| `processors_profile_log`, `aggregated_zookeeper_log`, `zookeeper_connection_log` | **daily** (`event_date`) since 2026-09-07 | 30 d | upstream ships the TTL and a **monthly** partition; **this repo** re-partitions them by merging `partition_by` / `ttl` / `settings` into upstream's block (no `replace`, no `<engine>`, so the sorting key and intervals stay upstream's) |
 | `metric_log`, `asynchronous_metric_log`, `text_log`, `error_log`, `background_schedule_pool_log`, `query_views_log` | **daily** | **7 d** | **this repo** — `configuration.files` on the `ClickHouseInstallation` |
+| `query_metric_log` | — | — | **removed** by this repo (`<query_metric_log remove="1"/>`, 2026-09-07): upstream ships it with no TTL, 1,391 columns, and nothing here reads it |
+
+Every repo-managed engine string also carries `SETTINGS ttl_only_drop_parts = 1`
+(2026-09-07). With a daily partition and a day-granular TTL every row in a part
+expires at the same instant, so expiry is a whole-part drop instead of a rewrite
+that reads the part to produce an empty one. `query_log` and `part_log` are the
+exception: operator-owned, still at the default `0`, a follow-up once their
+operator XML has been read off a pod. `text_log` runs at `level` **information**
+since the same date — at `trace` it was the largest `system.*` table (~60 k
+rows/hour, measured flat after the merge retry storm ended, so the storm was not
+the cause). `metric_log` uses `schema_type` **`transposed_with_wide_view`**: one
+row per metric instead of ~1,900 columns, with a wide view under the old name so
+existing queries keep working; merge memory scales with column count, and one
+`metric_log` merge had peaked at 1.27 GiB of a 1.80 GiB self-cap.
 
 Before the last row existed, those five had **no expiry at all** and grew for the
 life of the cluster: ~59 % of all system-log bytes at 46 minutes uptime.
@@ -280,10 +294,11 @@ file on operator bumps.
 
 **Why the partition key moves with the TTL.** All five shipped monthly
 (`toYYYYMM`). A 7-day TTL on a monthly partition is the misaligned case in
-[Partitions and TTL](fundamentals.md#the-alignment-rule): `ttl_only_drop_parts`
-is `0` by default here, so expiry deletes rows, which means rewriting
+[Partitions and TTL](fundamentals.md#the-alignment-rule): at the default
+`ttl_only_drop_parts = 0` expiry deletes rows, which means rewriting
 month-sized parts to trim 7-day-old data. Daily partitions make each expiry a
-bounded one-day rewrite. The operator reached the same conclusion for its own
+bounded one-day rewrite, and `ttl_only_drop_parts = 1` (set 2026-09-07) turns
+that rewrite into a drop. The operator reached the same conclusion for its own
 three tables.
 
 > Count these yourself rather than trusting the table. ClickHouse creates a
@@ -327,8 +342,10 @@ kubectl exec -n monitoring chi-clickhouse-otel-0-0-0 -c clickhouse -- \
 Measured 2026-09-06: **24 declared, 13 born.** Of the eleven not yet created,
 `crash_log` is deliberately left alone — a crash record is the last thing to
 expire — and the rest (`backup_log`, `session_log`, `opentelemetry_span_log`,
-`query_metric_log`, the lake-format logs, `instrumentation_trace_log`) belong to
-features this platform does not use. Revisit this list when one of them appears.
+the lake-format logs, `instrumentation_trace_log`) belong to features this
+platform does not use. `query_metric_log` was in that list and then appeared on
+the 2026-09-07 audit as the seventh table with no TTL — it is now removed from
+the config outright. Revisit this list when one of them appears.
 
 **Do not shorten that predicate.** Neither `'TTL'` nor `' TTL '` works:
 `metric_log` has ~1,900 columns and one of their *comments* reads `"... TTL

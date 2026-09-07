@@ -353,6 +353,21 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **Every repo-managed ClickHouse `system.*` log table now drops expired parts
+  instead of rewriting them, and the last unbounded table is gone** (issue #1025,
+  one engine-string change so the lazy `<name>_N` rename happens once).
+  `SETTINGS ttl_only_drop_parts = 1` on all seven engine strings; the three
+  monthly-partitioned tables (`processors_profile_log`, `aggregated_zookeeper_log`,
+  `zookeeper_connection_log`, 30 d TTL — 30 `event_date`s per partition expiring
+  on 30 different days) re-partitioned by `event_date` by merging into upstream's
+  block; `<query_metric_log remove="1"/>` (1,391 columns, no TTL upstream, no
+  reader); `text_log` level `trace` → `information` (~60 k rows/hour flat after
+  the retry storm, the largest `system.*` table); `metric_log`
+  `schema_type transposed_with_wide_view` so one merge no longer peaks at
+  1.27 GiB of a 1.80 GiB self-cap. Post-deploy: drop `_log_[0-9]+$` leftovers
+  per replica, twice. `query_log`/`part_log` (operator-owned) keep the default
+  until their XML is read off a pod.
+
 - **The CNPG physical-replication alerts measured the wrong thing and excluded
   the DR cluster.** Found while auditing three of them that looked like false
   positives — they were not. Six chart-generated rules are replaced by a

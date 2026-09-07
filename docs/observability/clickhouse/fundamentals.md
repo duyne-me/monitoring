@@ -207,9 +207,11 @@ Measured on the deployed cluster:
 | Tables | `PARTITION BY` | TTL | `ttl_only_drop_parts` | Verdict |
 |---|---|---|---|---|
 | `otel_logs`, `otel_traces`, `otel_traces_trace_id_ts` | `toDate(Timestamp)` — **daily** | 90 d | **`1`** | aligned; expiry is a part drop |
-| `query_log`, `part_log`, `trace_log` | `event_date` — **daily** | 30 d | `0` | aligned; one day rewritten at a time |
-| `processors_profile_log`, `aggregated_zookeeper_log`, `zookeeper_connection_log` | `toYYYYMM(event_date)` — **monthly** | 30 d | `0` | **misaligned** — month-sized rewrites |
-| `metric_log`, `asynchronous_metric_log`, `text_log`, `error_log`, `background_schedule_pool_log` | `event_date` — **daily** | 7 d | `0` | aligned; set by this repo after they shipped monthly with no TTL at all |
+| `query_log`, `part_log` | `event_date` — **daily** | 30 d | `0` | aligned; one day rewritten at a time (operator-owned; the setting is a follow-up) |
+| `trace_log` | `event_date` — **daily** | 7 d | **`1`** | aligned; operator table, TTL and setting overridden by this repo |
+| `processors_profile_log`, `aggregated_zookeeper_log`, `zookeeper_connection_log` | `event_date` — **daily** | 30 d | **`1`** | aligned since 2026-09-07; shipped `toYYYYMM` — the misaligned case, 30 `event_date`s per partition expiring on 30 different days |
+| `metric_log`, `asynchronous_metric_log`, `text_log`, `error_log`, `background_schedule_pool_log`, `query_views_log` | `event_date` — **daily** | 7 d | **`1`** | aligned; set by this repo after they shipped monthly with no TTL at all; the setting joined 2026-09-07 |
+| `query_metric_log` | — | — | — | **removed** 2026-09-07: no TTL upstream, 1,391 columns, no reader |
 
 Two things are worth reading twice.
 
@@ -362,4 +364,4 @@ Connect commands: [Playground](README.md#playground--mergetree-by-hand).
 
 ---
 
-_Last updated: 2026-09-04 — the platform audit table now shows the five formerly unmanaged `system.*` tables on a 7-day TTL with daily partitions, set by this repo. Earlier the same day: added **Partitions and TTL**: the alignment rule between `PARTITION BY` and TTL granularity, both `ttl_only_drop_parts` modes with the settings read off the deployed cluster, the audit of which `otel.*` and `system.*` tables are aligned, and the object-store lifecycle trap for the planned S3 tier. Inline vendor-figure source links removed (References already cites the overview). Earlier the same day: page created._
+_Last updated: 2026-09-07 — audit table: every repo-managed `system.*` engine string now carries `ttl_only_drop_parts = 1`, the three monthly tables are daily, `query_metric_log` is removed (issue #1025). Previously 2026-09-04 — the platform audit table now shows the five formerly unmanaged `system.*` tables on a 7-day TTL with daily partitions, set by this repo. Earlier the same day: added **Partitions and TTL**: the alignment rule between `PARTITION BY` and TTL granularity, both `ttl_only_drop_parts` modes with the settings read off the deployed cluster, the audit of which `otel.*` and `system.*` tables are aligned, and the object-store lifecycle trap for the planned S3 tier. Inline vendor-figure source links removed (References already cites the overview). Earlier the same day: page created._

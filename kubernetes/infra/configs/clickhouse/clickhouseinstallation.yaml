@@ -168,60 +168,119 @@ spec:
     #
     # ONE MANUAL STEP REMAINS -- see docs/observability/clickhouse/README.md
     # "The engine's own log tables". Changing a system table's engine definition
-    # does not ALTER it: ClickHouse renames the old table to `<name>_0` and
+    # does not ALTER it: ClickHouse renames the old table to `<name>_N` and
     # creates a fresh one, and the renamed copy keeps its rows with NO TTL. Those
     # have to be dropped per replica or this change frees nothing. The rename is
     # also LAZY -- measured, it happens at each table's first write after the
     # config change, so the cleanup cannot be a single pass straight after apply.
+    # Match `_log_[0-9]+$`, not `_0`: a cleanup that matched `LIKE '%\_0'`
+    # missed `trace_log_1` holding 153 MiB.
+    #
+    # 2026-09-07, from the live audit in issue #1025 (four findings, one
+    # engine-string change so the lazy rename above happens ONCE):
+    #
+    #   * `SETTINGS ttl_only_drop_parts = 1` on every engine string. With a daily
+    #     partition and a day-granular TTL, every row in a part expires at the
+    #     same instant, so the part is entirely expired -- the case a whole-part
+    #     DROP exists for. At the default 0 the server still reads and rewrites
+    #     the part to reach an empty one. The setting has to live INSIDE the
+    #     engine string: once <engine> is declared, partition_by/ttl/order_by/
+    #     settings are refused as siblings.
+    #   * processors_profile_log, aggregated_zookeeper_log and
+    #     zookeeper_connection_log shipped monthly (toYYYYMM) with a 30-day TTL:
+    #     the misaligned case, 30 distinct event_dates per partition expiring on
+    #     30 different days, a rewrite pass each. No `replace="1"` on these
+    #     three, on purpose: no <engine> is declared, so partition_by / ttl /
+    #     settings MERGE into upstream's block and the sorting key, flush and
+    #     collect intervals stay whatever upstream ships. Sized on 2026-09-07:
+    #     12 MiB, 6 MiB and 7 KiB, so the win is correctness, not bytes. The 30 d
+    #     TTLs first fire ~2026-10-05 on that cluster; this lands before that.
+    #   * query_metric_log removed. Seventh table with no TTL, 1,391 columns
+    #     (second only to metric_log), no reader on this platform. Removing the
+    #     section is upstream's documented off switch; a TTL would have kept the
+    #     merge cost of a table nobody queries.
+    #   * text_log level trace -> information. Measured at ~60 k rows/hour flat
+    #     AFTER the merge retry storm ended, so the storm was not what filled it:
+    #     trace is simply that expensive (135 MiB in two days, the largest
+    #     system.* table). Information keeps every warning and error line.
+    #   * metric_log schema_type transposed_with_wide_view (25.x+). Stores one
+    #     row per (metric, value) instead of ~1,900 columns and exposes a wide
+    #     VIEW under the old name, so the operator's queries keep working. Merge
+    #     memory scales with column count -- this is the root fix for a single
+    #     metric_log merge peaking at 1.27 GiB of a 1.80 GiB self-cap in the
+    #     clean window. Only stated limitation is no sub-second resolution,
+    #     irrelevant at 15 s.
+    #
+    # part_log and query_log (operator-owned, daily, 30 d) still run
+    # ttl_only_drop_parts = 0. Their operator XML has not been read off a pod
+    # yet, and overriding a section without repeating every setting in it
+    # silently reverts the rest -- follow-up, not this change.
     files:
       02-system-log-retention.xml: |
         <clickhouse>
             <metric_log replace="1">
                 <database>system</database>
                 <table>metric_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
                 <collect_interval_milliseconds>15000</collect_interval_milliseconds>
+                <schema_type>transposed_with_wide_view</schema_type>
             </metric_log>
             <asynchronous_metric_log replace="1">
                 <database>system</database>
                 <table>asynchronous_metric_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (metric, event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (metric, event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7000</flush_interval_milliseconds>
             </asynchronous_metric_log>
             <text_log replace="1">
                 <database>system</database>
                 <table>text_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-                <level>trace</level>
+                <level>information</level>
             </text_log>
             <error_log replace="1">
                 <database>system</database>
                 <table>error_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
                 <collect_interval_milliseconds>1000</collect_interval_milliseconds>
             </error_log>
             <background_schedule_pool_log replace="1">
                 <database>system</database>
                 <table>background_schedule_pool_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
                 <duration_threshold_milliseconds>30</duration_threshold_milliseconds>
             </background_schedule_pool_log>
             <query_views_log replace="1">
                 <database>system</database>
                 <table>query_views_log</table>
-                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>ENGINE = MergeTree PARTITION BY event_date ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
             </query_views_log>
             <trace_log replace="1">
                 <database>system</database>
                 <table>trace_log</table>
-                <engine>Engine = MergeTree PARTITION BY event_date ORDER BY event_time TTL event_date + INTERVAL 7 DAY</engine>
+                <engine>Engine = MergeTree PARTITION BY event_date ORDER BY event_time TTL event_date + INTERVAL 7 DAY SETTINGS ttl_only_drop_parts = 1</engine>
                 <flush_interval_milliseconds>7500</flush_interval_milliseconds>
             </trace_log>
+            <processors_profile_log>
+                <partition_by>event_date</partition_by>
+                <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+                <settings>ttl_only_drop_parts = 1</settings>
+            </processors_profile_log>
+            <aggregated_zookeeper_log>
+                <partition_by>event_date</partition_by>
+                <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+                <settings>ttl_only_drop_parts = 1</settings>
+            </aggregated_zookeeper_log>
+            <zookeeper_connection_log>
+                <partition_by>event_date</partition_by>
+                <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+                <settings>ttl_only_drop_parts = 1</settings>
+            </zookeeper_connection_log>
+            <query_metric_log remove="1"/>
         </clickhouse>
     clusters:
       - name: otel
