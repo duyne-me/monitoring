@@ -8,7 +8,7 @@
 | **Metrics** | `chi_clickhouse_metric_DiskFreeBytes / chi_clickhouse_metric_DiskTotalBytes < 0.05` |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Data analysis · ClickHouse → Server engine |
-| **Local-stack** | not present — the compose stack uses a named volume with no ratio metric |
+| **Local-stack** | present — same ratio `< 0.05` from the server's `ClickHouseAsyncMetrics_Disk*_default` on the named docker volume; there growing the volume is a real option |
 
 ## Meaning
 

@@ -8,7 +8,7 @@
 | **Metrics** | `chi_clickhouse_metric_fetch_errors` — the **Altinity metrics-exporter's** view, 3 hostnames × 7 `fetch_type` = 21 series |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Server engine · ClickHouse → Overview |
-| **Local-stack** | not present — local-stack is single-node with no operator and no exporter |
+| **Local-stack** | present under the same name — compose has one node, so `up{job="clickhouse"} == 0` is both "all replicas" and "the server"; no operator, no exporter |
 
 ## Meaning
 

@@ -131,6 +131,13 @@ Skeleton (copy what you need):
   once; no table references the policy until the schema change lands. On Kind
   this is the production shape, not capacity: every path is the same node
   filesystem and cold bytes exist three times.
+- **Prerequisites for the ClickHouse cold tier on RustFS.** A `clickhouse-otel`
+  bucket in both `mc` bucket lists (the run-once Job and the 30-minute CronJob,
+  which must stay in step), a `clickhouse-rustfs` ClusterExternalSecret that
+  lands `clickhouse-rustfs-credentials` in `monitoring` from the existing
+  OpenBAO RustFS keys, and `clickhouse-local` now `dependsOn: storage-local` —
+  the S3 disk's startup access check needs the bucket before the first replica
+  can start. Nothing reads the Secret yet; the disk itself is the next change.
 
 - **The two Temporal capacity alerts finally exist, and ship with something that
   acts on them.** `TemporalScheduleToStartLatencyHigh` (SDK schedule-to-start p99
@@ -312,6 +319,16 @@ Skeleton (copy what you need):
 
 #### Docs
 
+- **New: [`docs/observability/runbooks/clickhouse/README.md`](docs/observability/runbooks/clickhouse/README.md)** —
+  the ClickHouse alert group had 14 per-alert runbooks since 2026-09-05 and no
+  folder index, no row in the runbook hub, and no `Per-alert runbooks:` line in
+  alert-catalog § 8b. The README adds the index, the four-producer label table
+  (`hostname` vs `replica` vs `pod`), the node-vs-PVC disk note, and four
+  investigation workflows distilled from the #1025 live audit: is TTL keeping up
+  (partition age, `TTLDeleteMerge` count, pool size 2 vs TTL cap 2), merge memory
+  by column count, `_log_[0-9]+$` leftovers after an engine change, and which
+  disk an alert measures. The runbook tree in `docs/observability/README.md`
+  listed 5 of 13 folders; it now lists all of them with re-counted files.
 - **New: [`docs/platform/worker-autoscaling.md`](docs/platform/worker-autoscaling.md)** —
   written from the ADR-055 Kind drill, for a reader who has to operate this rather
   than re-derive it. Six sections, each one a mistake that was actually made and
@@ -363,6 +380,21 @@ Skeleton (copy what you need):
 ### Bugfix
 
 #### Observability
+
+- **Every repo-managed ClickHouse `system.*` log table now drops expired parts
+  instead of rewriting them, and the last unbounded table is gone** (issue #1025,
+  one engine-string change so the lazy `<name>_N` rename happens once).
+  `SETTINGS ttl_only_drop_parts = 1` on all seven engine strings; the three
+  monthly-partitioned tables (`processors_profile_log`, `aggregated_zookeeper_log`,
+  `zookeeper_connection_log`, 30 d TTL — 30 `event_date`s per partition expiring
+  on 30 different days) re-partitioned by `event_date` by merging into upstream's
+  block; `<query_metric_log remove="1"/>` (1,391 columns, no TTL upstream, no
+  reader); `text_log` level `trace` → `information` (~60 k rows/hour flat after
+  the retry storm, the largest `system.*` table); `metric_log`
+  `schema_type transposed_with_wide_view` so one merge no longer peaks at
+  1.27 GiB of a 1.80 GiB self-cap. Post-deploy: drop `_log_[0-9]+$` leftovers
+  per replica, twice. `query_log`/`part_log` (operator-owned) keep the default
+  until their XML is read off a pod.
 
 - **The CNPG physical-replication alerts measured the wrong thing and excluded
   the DR cluster.** Found while auditing three of them that looked like false
@@ -589,6 +621,22 @@ Skeleton (copy what you need):
   minute**, `GetTimerTasks` from **19.2 s to 0.87 s**, both `WorkerDeployment`
   CRs reached `Current`, and `apps-local` went Ready for the first time — 29/29
   Kustomizations.
+
+#### Local-stack
+
+- **The compose ClickHouse alert slice matches the cluster catalog again.**
+  `ClickHouseDiskAlmostFull` said "30-day TTL" while the collector sets
+  `ttl: 2160h` (90 d); `ClickHouseMergesFailing` read
+  `ClickHouseProfileEvents_FailedMerges`, a counter the server never publishes,
+  so it could not fire and only padded the C21 count; `ClickHouseServerUnreachable`
+  was the name the cluster retired in RFC-0028 — renamed to
+  `ClickHouseAllReplicasUnreachable` so the runbook of that name transfers, and
+  every rule with a cluster twin now carries its `runbook_url`. The § 5C
+  cluster↔local mapping in `local-stack/docs/observability.md` was rewritten
+  against the live cluster expressions (it still listed three deleted
+  `chi_clickhouse_event_*` rules and the pre-fix disk ratio), and the C21 row
+  and inline check agree on **18 alerting** rules (the table said 18, the
+  script wanted 19).
 
 #### Docs
 

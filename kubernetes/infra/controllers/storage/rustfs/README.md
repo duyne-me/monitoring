@@ -22,7 +22,7 @@ RustFS is a high-performance, distributed object storage system (S3-compatible) 
 
 ```bash
 # Port-forward for local access
-kubectl port-forward -n rustfs svc/rustfs 9000:9000 9001:9001
+kubectl port-forward -n rustfs svc/rustfs-svc 9000:9000 9001:9001
 
 # API: http://localhost:9000
 # Console: http://localhost:9001

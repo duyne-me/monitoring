@@ -338,7 +338,8 @@ Every manifest applied to the cluster must satisfy admission:
   flux-system → controllers-local → {secrets, monitoring, network-policies,
   gateway-api-crds, ...}
   secrets → {cert-manager, clickhouse-keeper, storage, profiling}
-  clickhouse-keeper → clickhouse → clickhouse-schema (DDL bootstrap Job) → tracing
+  clickhouse-keeper → clickhouse (also after storage: RustFS cold-tier bucket) →
+  clickhouse-schema (DDL bootstrap Job) → tracing
   cert-manager → {envoy-gateway (also after gateway-api-crds),
   cnpg-barman-plugin}
   databases (after secrets + monitoring + cnpg-barman-plugin + storage +

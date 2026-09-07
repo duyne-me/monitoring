@@ -214,19 +214,22 @@ Same alert **names** as the merged cluster catalog
 [alert-catalog § 8b](../../docs/observability/alerting/alert-catalog.md#8b-clickhouse-otel-olap-engine)),
 so a runbook practised locally transfers. Different series by design:
 
-| Alert (cluster name) | Cluster expr (chi_*) | Local expr |
+| Alert (cluster name) | Cluster expr | Local expr |
 |---|---|---|
-| ClickHouseServerUnreachable | exporter `fetch_errors > 0` | `up{job="clickhouse"} == 0` — locally `up` is a genuine server scrape |
-| ClickHouseDiskAlmostFull / Critical | `chi_clickhouse_metric_DiskFreeBytes / (DiskDataBytes + DiskFreeBytes)` | `ClickHouseAsyncMetrics_DiskAvailable_default / DiskTotal_default` |
+| ClickHouseAllReplicasUnreachable | fraction of hosts with exporter `fetch_errors > 0` `== 1` | `up{job="clickhouse"} == 0` — one node, so "all replicas" and "the server" are the same event; locally `up` is a genuine server scrape |
+| ClickHouseReplicaUnreachable | `max by (hostname) (chi_clickhouse_metric_fetch_errors) > 0` | **absent** — one node, no partial-replica state |
+| ClickHouseDiskAlmostFull / Critical | `chi_clickhouse_metric_DiskFreeBytes / chi_clickhouse_metric_DiskTotalBytes < 0.15 / 0.05` | `ClickHouseAsyncMetrics_DiskAvailable_default / DiskTotal_default` |
 | ClickHouseTooManyParts | `chi_clickhouse_metric_PartsActive > 300` | `ClickHouseMetrics_PartsActive > 300` |
-| ClickHouseInsertsRejected | `chi_clickhouse_event_RejectedInserts` | `ClickHouseProfileEvents_RejectedInserts` |
-| ClickHouseInsertsFailing | `chi_clickhouse_event_FailedInsertQuery` | `ClickHouseProfileEvents_FailedInsertQuery` |
-| ClickHouseMergesFailing | `chi_clickhouse_event_FailedMerges` | `ClickHouseProfileEvents_FailedMerges` |
-| ClickHouseInsertsDelayed | `chi_clickhouse_event_DelayedInserts` | `ClickHouseProfileEvents_DelayedInserts` |
-| ClickHouseServerErrorsElevated | `chi_clickhouse_system_errors_value` | `{__name__=~"ClickHouseErrorMetric_.+"}` |
-| ClickHouseExporterUnhealthy | `otelcol_exporter_send_failed_*{exporter="clickhouse"}` | **identical** |
+| ClickHouseInsertsDelayed | `chi_clickhouse_metric_DelayedInserts > 0` (gauge from system.metrics) | `rate(ClickHouseProfileEvents_DelayedInserts[5m]) > 0` (counter from system.events — a different family, so the shape differs on purpose) |
+| ClickHouseInsertsRejected / InsertsFailing | **deleted on the cluster** 2026-08-22 — the exporter builds `chi_clickhouse_event_*` from `system.events`, which omits counters still at zero, so the series never appeared | `rate(ClickHouseProfileEvents_RejectedInserts[5m])`, `rate(ClickHouseProfileEvents_FailedInsertQuery[5m])` — local-only names, no runbook |
+| ClickHouseServerErrorsElevated | `max by (replica) (rate(ClickHouseErrorMetric_ALL{job="clickhouse-server"}[5m])) > 5` | `sum(rate(ClickHouseErrorMetric_ALL[5m])) > 5` — `sum` is fine on one node; `_ALL` is read directly (the `ClickHouseErrorMetric_.+` regex double-counted) |
+| ClickHouseExporterUnhealthy | `otelcol_exporter_send_failed_*{exporter="clickhouse"}` | **identical** (lives in `otel-collector.yaml`) |
 | OtelCollectorDown | `up{job=~".*otel-collector.*"}` | `up{job="otel-collector"}` |
+| ClickHouseReadonlyReplica, ClickHouseZooKeeperExceptions, ClickHouseKeeperNoLeader, ClickHouseKeeperQuorumDegraded | server `:9363` and Keeper `:7000` families | **absent** — no replication, no Keeper in Compose |
 | ClickHouseOperatorDown / ReconcileErrors | operator series | **absent** — no operator in Compose |
+
+`ClickHouseMergesFailing` was removed from both stacks: `FailedMerges` is not a
+counter the server publishes.
 
 Beyond the ClickHouse slice, `rules/` also carries the vendored RFC-0021
 recording rules (`rfc0021-baseline.yaml`, `inventory.yaml` — 15 recording +
@@ -283,7 +286,7 @@ in both stacks.
 |---|---|
 | Confirm all six scrape targets are up | `curl -s http://localhost:8429/api/v1/targets \| jq '[.data.activeTargets[] \| {job:.labels.job,health}]'` |
 | List loaded/firing alerts | `curl -s http://localhost:8880/api/v1/alerts \| jq '.data.alerts[] \| {name:.labels.alertname,state}'` |
-| Rehearse `ClickHouseServerUnreachable` | `docker compose stop clickhouse` → firing within ~5m → `docker compose start clickhouse` |
+| Rehearse `ClickHouseAllReplicasUnreachable` | `docker compose stop clickhouse` → firing within ~5m → `docker compose start clickhouse` |
 | Rehearse `ClickHouseExporterUnhealthy` | `docker compose pause clickhouse` → collector `send_failed_*` climbs → `unpause` |
 | Explore engine metrics | Grafana → Explore → VictoriaMetrics → `ClickHouseMetrics_Query`, `ClickHouseProfileEvents_InsertedRows`, `ClickHouseAsyncMetrics_Uptime` |
 | Engine dashboard | Grafana → ClickHouse folder → **ClickHouse Server / Engine** (local series carry the `(local)` legend suffix) |
