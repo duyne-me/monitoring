@@ -366,7 +366,7 @@ services:
   # the collector fans logs+traces here too. otel_logs/otel_traces auto-created by
   # the exporter (create_schema). Dev: default user, no password.
   clickhouse:
-    image: clickhouse/clickhouse-server:26.7
+    image: clickhouse/clickhouse-server:26.8
     environment:
       CLICKHOUSE_DB: otel
       CLICKHOUSE_PASSWORD: otel # dev password (CH ≥25.3 requires one for default); cluster uses an ESO secret

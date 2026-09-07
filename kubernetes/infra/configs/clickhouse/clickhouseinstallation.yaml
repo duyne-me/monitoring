@@ -395,7 +395,7 @@ spec:
               type: RuntimeDefault
           containers:
             - name: clickhouse
-              image: clickhouse/clickhouse-server:26.7
+              image: clickhouse/clickhouse-server:26.8
               # Named so the PodMonitor can reference it: the operator-generated
               # Services carry only the native/HTTP/interserver ports, so :9363
               # is reachable for scraping through the pod, not through a Service
