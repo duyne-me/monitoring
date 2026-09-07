@@ -338,6 +338,12 @@ Skeleton (copy what you need):
 
 #### Proposals
 
+- **RFC-0030 advances to `provisional` for Backoffice commerce analytics.** The
+  owner passed the research gate after the Context7, PostgreSQL extension, and
+  deferred PeerDB audits. Architecture review now covers the proposed
+  15-minute batch, isolated ClickHouse commerce model, read-only
+  `analytics-service`, Admin page, rollout/rollback, and two future ADRs; no
+  component is installed by this documentation change.
 - **RFC-0030 research opens the Backoffice commerce-analytics design.** It
   defines ledger-owned money semantics, cohort funnel rules, completed-batch
   visibility, a read-only analytics boundary, and an Admin Portal-native page;
