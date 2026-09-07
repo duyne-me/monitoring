@@ -121,6 +121,16 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **ClickHouse gets an S3 disk on RustFS and a `hot_cold` storage policy**
+  (`03-storage-rustfs.xml` on the CHI; 2 of 4). Disk `s3` at
+  `rustfs-svc.rustfs.svc.cluster.local:9000/clickhouse-otel/{replica}/` with
+  credentials via `from_env` from `clickhouse-rustfs-credentials`, a 1Gi local
+  cache over it, `hot` = `default` so existing tables can adopt the policy by
+  `ALTER`, `move_factor 0` (only TTL moves, never node-free-space), no
+  TTL-move-on-insert, zero-copy replication explicitly off. Rolls the three pods
+  once; no table references the policy until the schema change lands. On Kind
+  this is the production shape, not capacity: every path is the same node
+  filesystem and cold bytes exist three times.
 - **Prerequisites for the ClickHouse cold tier on RustFS.** A `clickhouse-otel`
   bucket in both `mc` bucket lists (the run-once Job and the 30-minute CronJob,
   which must stay in step), a `clickhouse-rustfs` ClusterExternalSecret that
