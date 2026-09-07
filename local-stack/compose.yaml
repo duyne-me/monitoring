@@ -445,7 +445,7 @@ services:
   # shows up as collector export failures. Jobs live in
   # observability/vmagent/prometheus.yml (the local ServiceMonitor analogue).
   vmagent:
-    image: victoriametrics/vmagent:v1.150.0
+    image: victoriametrics/vmagent:v1.151.0
     command:
       - "-promscrape.config=/etc/vmagent/prometheus.yml"
       - "-remoteWrite.url=http://victoria-metrics:8428/api/v1/write"
