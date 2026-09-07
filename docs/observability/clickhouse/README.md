@@ -13,8 +13,8 @@ LogsQL/TraceQL-only ops primaries can't, plus the `otel_logs`↔`otel_traces`
 | **Operator** | Altinity `clickhouse-operator` `0.27.3` + a `ClickHouseInstallation` CR and a `ClickHouseKeeperInstallation` CR |
 | **Ingest** | OTel Collector contrib `clickhouse` exporter — fan-out on the **traces + logs** pipelines (metrics stay on VictoriaMetrics — **never** here) |
 | **Tables** | `otel.otel_logs`, `otel.otel_traces` (+ `otel_traces_trace_id_ts` MV), created by the **`clickhouse-schema` Job** from DDL committed in git; the exporter only INSERTs |
-| **Retention** | `otel.*`: **TTL 90 days** (`ttl_only_drop_parts`) vs 7d on the ops primaries — the long-retention payoff. The engine's own `system.*` log tables run [7–30 days from three different owners](#the-engines-own-log-tables) |
-| **Storage** | local PVC `standard` `10Gi` **per replica** (cluster) + small keeper PVCs; a named `clickhouse-data` volume (local-stack, which stays single-node) |
+| **Retention** | `otel.*`: **TTL 90 days** (`ttl_only_drop_parts`) vs 7d on the ops primaries — the long-retention payoff; `otel_logs` / `otel_traces` parts older than **7 days move to the RustFS cold tier** first ([details](#cold-tier-on-rustfs)). The engine's own `system.*` log tables run [7–30 days from three different owners](#the-engines-own-log-tables) |
+| **Storage** | hot: local PVC `standard` `10Gi` **per replica** (cluster) + small keeper PVCs; cold: RustFS bucket `clickhouse-otel/{replica}/` behind a 1Gi local cache (policy `hot_cold`); a named `clickhouse-data` volume and no tier (local-stack, which stays single-node) |
 | **Query** | Grafana `grafana-clickhouse-datasource` **4.20.0** (`uid: clickhouse`, native `:9000`) + 5 provisioned dashboards in the **ClickHouse** folder (suite Overview→Logs→Traces, service deep dive, platform SQL) |
 | **App code** | **Unchanged** — `pkg/obsx` / `pkg/grpcx` untouched; adding ClickHouse is a Collector-exporter change |
 | **Design** | [RFC-0019](../../proposals/rfc/RFC-0019/) · [ADR-023](../../proposals/adr/ADR-023-clickhouse-observability-olap/) · [RFC-0028](../../proposals/rfc/RFC-0028/) · [ADR-065](../../proposals/adr/ADR-065-clickhouse-replicated-topology/) |
@@ -140,10 +140,10 @@ and is the counting workhorse. Traces are exemplars joined back on `trace_id`.
 | **Operator** | Altinity `altinity-clickhouse-operator` `0.27.3` (HelmRelease in the `controllers` wave, ns `monitoring`); CRDs health-checked before the CHI applies (`kubernetes/infra/controllers/clickhouse-operator/`) |
 | **Instance** | `ClickHouseInstallation` `clickhouse` (cluster `otel`) → StatefulSets `chi-clickhouse-otel-0-{0,1,2}`, one per node (host anti-affinity); own Flux Kustomization `clickhouse-local` `dependsOn [controllers-local, secrets-local]`, health-checking **all three** (`kubernetes/infra/configs/clickhouse/`) |
 | **Coordination** | `ClickHouseKeeperInstallation` `keeper`, 3 replicas, referenced by name (`zookeeper.keeper.name`); holds the replication metadata. A replica that loses its Keeper session serves reads and refuses writes |
-| **Storage** | PVC `standard` `10Gi` per replica (`volumeClaimTemplates`) + keeper data `2Gi` (no log PVC — the operator's keeper logs to console); local-stack uses a named `clickhouse-data` volume |
+| **Storage** | PVC `standard` `10Gi` per replica (`volumeClaimTemplates`) + keeper data `2Gi` (no log PVC — the operator's keeper logs to console); S3 disk `s3` on RustFS + cache disk `s3_cache` + policy `hot_cold` from `03-storage-rustfs.xml` on the CHI, credentials via `from_env` from `clickhouse-rustfs-credentials`; local-stack uses a named `clickhouse-data` volume |
 | **Credentials** | `default` user password from OpenBAO `secret/local/infra/clickhouse/admin` via the `clickhouse-credentials` `ClusterExternalSecret` → Secret in `monitoring` (selector label `platform.duynhlab/clickhouse`); local-stack uses an inline dev password |
 | **Ingest** | Collector contrib `clickhouse` exporter appended to the `traces` + `logs` pipelines, **INSERT-only** (`create_schema: false`); `async_insert`, `sending_queue`, `retry_on_failure`; password via `${env:CLICKHOUSE_PASSWORD}` (`extraEnvs` secretKeyRef) |
-| **Schema owner** | The `clickhouse-schema` **Job**, SQL committed in `kubernetes/infra/configs/clickhouse-schema/` ([ADR-065](../../proposals/adr/ADR-065-clickhouse-replicated-topology/)). It creates the `otel` database with `ENGINE = Replicated` on each replica, then the tables once; the database's Keeper log propagates them. TTL 90d lives in that DDL |
+| **Schema owner** | The `clickhouse-schema` **Job**, SQL committed in `kubernetes/infra/configs/clickhouse-schema/` ([ADR-065](../../proposals/adr/ADR-065-clickhouse-replicated-topology/)). It creates the `otel` database with `ENGINE = Replicated` on each replica, then the tables once; the database's Keeper log propagates them. TTL 90d and the 7-day `TO VOLUME 'cold'` move live in that DDL. Fresh-only: there is no migration path, a pre-tier cluster is rebuilt by `make up` |
 | **Security** | `runAsNonRoot`, `runAsUser: 101`, `fsGroup: 101`, `allowPrivilegeEscalation: false`, drop `ALL` caps, `seccompProfile: RuntimeDefault`; `/ping` liveness+readiness; pinned image (PSS-baseline + no-latest) |
 | **Access** | Grafana datasource `uid: clickhouse` (`clickhouse-clickhouse.monitoring.svc.cluster.local:9000`, native, password via `valuesFrom`); **not** on any public Ingress; the `default` password is the access control (no NetworkPolicy — `monitoring` has no default-deny and netpol is inert on kindnet; a `:9000`/`:8123` NetworkPolicy is a follow-up for an enforcing CNI) |
 | **Startup ordering** | `clickhouse-local` → `clickhouse-schema-local` (the Job, `wait: true`) → `tracing-local`. The collector runs no DDL, so it must not start before the schema exists — it can no longer create what it is missing. In local-stack, which is single-node, the exporter still creates its own schema via `depends_on: service_healthy` |
@@ -184,8 +184,8 @@ CREATE TABLE IF NOT EXISTS otel.otel_traces
 ENGINE = ReplicatedMergeTree
 PARTITION BY toDate(Timestamp)
 ORDER BY (ServiceName, SpanName, toDateTime(Timestamp))
-TTL toDateTime(Timestamp) + toIntervalDay(90)
-SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+TTL toDateTime(Timestamp) + toIntervalDay(7) TO VOLUME 'cold', toDateTime(Timestamp) + toIntervalDay(90)
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1, storage_policy = 'hot_cold';
 ```
 
 - **`ORDER BY (ServiceName, SpanName, …)`** — the sparse index; filtering by
@@ -193,6 +193,9 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
   Why that prefix, and how to read `EXPLAIN`: [schema-and-queries](schema-and-queries.md).
 - **`PARTITION BY toDate(Timestamp)`** + **`ttl_only_drop_parts = 1`** — TTL drops
   whole day-partitions, so 90-day expiry is a cheap `DROP PARTITION`, not a rewrite.
+- **`TTL … + 7 days TO VOLUME 'cold'`** + **`storage_policy = 'hot_cold'`** — a
+  day's parts move to the RustFS cold tier once every row in them is a week old,
+  and are dropped from there at 90 days. Mechanics: [Cold tier on RustFS](#cold-tier-on-rustfs).
 - **`bloom_filter` on `TraceId`** + the `otel_traces_trace_id_ts` materialized view
   make single-trace lookups fast despite the service-first sort key —
   [materialized-views](materialized-views.md).
@@ -219,6 +222,76 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
 Retention is **90 days** here vs **7 days** on VictoriaLogs/VictoriaTraces — the reason
 ClickHouse exists on this platform.
+
+#### Cold tier on RustFS
+
+Since 2026-09-07 (owner decision, no RFC) `otel_logs` and `otel_traces` run a
+two-volume storage policy: **hot** is the `default` disk (the PVC), **cold** is a
+1Gi local cache in front of an `s3` disk on the in-cluster RustFS object store
+(`http://rustfs-svc.rustfs.svc.cluster.local:9000/clickhouse-otel/{replica}/`,
+plain HTTP, path style). The table TTL has two clauses: `+ 7 days TO VOLUME
+'cold'`, `+ 90 days` delete. `otel_traces_trace_id_ts` stays hot — three narrow
+columns and the random-access lookup every trace-by-id query starts with, so S3
+would cost a RustFS round-trip per lookup for no space gain.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Disks `s3`, `s3_cache`; policy `hot_cold` | CHI `spec.configuration.files` `03-storage-rustfs.xml` | `move_factor 0` (only TTL moves — the hot disk is the quota-less node filesystem, so free-space-driven moves would fire at node <10 % and write to that same filesystem); `perform_ttl_move_on_insert false` (an INSERT never waits on RustFS); zero-copy replication explicitly off |
+| Credentials | `clickhouse-rustfs-credentials` (ClusterExternalSecret from the OpenBAO RustFS keys) → container env `CLICKHOUSE_S3_*` → `from_env` in the XML | Never written into the manifest; not named `AWS_*` so the SDK's default chain cannot pick them up for unrelated `s3()` calls |
+| Bucket | `clickhouse-otel`, created by the RustFS `mc` Job and 30-minute CronJob (two lists, `make validate` keeps them equal) | `clickhouse-local` `dependsOn: storage-local` because the `s3` disk runs an access check at server start |
+| DDL | `configmap-schema.yaml` (tiered CREATEs, in the server's normalised form) | Fresh `make up` creates the tiered form directly; no migration path by decision. The schema Job refuses to start until every replica has the policy and verifies two tiered tables plus both S3 disks |
+
+**How a part moves.** TTL is applied by background merges, so a part crosses to
+cold once *every* row in it is older than 7 days — with daily partitions that is
+the day after its partition turns a week old — and each of the three replicas
+uploads its own copy (no zero-copy). The object names are random; what ties them
+to a table is the **metadata file** ClickHouse keeps on the PVC under
+`/var/lib/clickhouse/disks/s3/`, one per column file, listing blob keys and sizes.
+
+**What this buys on Kind, honestly: the production shape, not capacity.** The
+`default` disk, the cache, the S3 metadata and RustFS's own PV are all hostPath
+directories on the same node filesystem, and cold bytes exist three times. The
+rehearsal — TTL moves, a second disk in every alert, an object store that can be
+down — is the point.
+
+**The engine deletes; the bucket never expires.** The RustFS bucket carries no
+lifecycle rule and must never get one: an object removed behind ClickHouse's back
+leaves a metadata file pointing at nothing, and the part it belongs to becomes
+unreadable with no self-heal short of re-fetching from a peer. On a real object
+store, a lifecycle rule may exist only as an orphan backstop set well after the
+table TTL (the post that prompted this work says 30 vs 32 days), never as the
+retention mechanism.
+
+**When RustFS is down** (it is one pod): INSERTs land hot; queries pruned to the
+last 7 days succeed; anything touching a cold partition fails with `S3_ERROR`
+(alert `ClickHouseS3Errors`); moves, cold merges and cold-part TTL drops retry
+with no loss; a ClickHouse pod that restarts during the outage stays down on the
+disk access check until RustFS returns.
+
+**Orphans.** Objects under a replica's `{replica}/` prefix are deleted by hand
+only when that replica's PVC is being rebuilt from its peers — never otherwise.
+
+```sql
+-- where the parts are
+SELECT table, disk_name, count() AS parts, formatReadableSize(sum(bytes_on_disk)) AS on_disk,
+       min(min_date), max(max_date)
+FROM system.parts WHERE database = 'otel' AND active
+GROUP BY table, disk_name ORDER BY table, disk_name;
+
+-- moves in flight, and parts that should have moved but did not (expect 0 rows)
+SELECT * FROM system.moves;
+SELECT table, partition FROM system.parts
+WHERE database = 'otel' AND active AND disk_name = 'default' AND max_date < today() - 8;
+
+-- local metadata -> S3 key mapping, and the cache fill against its 1Gi
+SELECT * FROM system.remote_data_paths LIMIT 5;
+SELECT cache_name, formatReadableSize(sum(size)) FROM system.filesystem_cache GROUP BY cache_name;
+```
+
+Rollback is data-safe but ordered: `MODIFY TTL` back to delete-only, then
+`ALTER TABLE … MOVE PARTITION '<day>' TO VOLUME 'hot'` per cold partition, then
+`MODIFY SETTING storage_policy = 'default'` (refused while parts sit on
+`s3_cache`). Never remove `03-storage-rustfs.xml` while any part is cold.
 
 #### The engine's own log tables
 
@@ -710,10 +783,13 @@ edge access log, which lives nowhere else, is being dropped); the **replication 
 — `ClickHouseZooKeeperExceptions` and `ClickHouseReadonlyReplica`, which catch
 the failure nothing else notices, because a replica that lost its quorum keeps
 answering reads while falling behind; the **disk pair** (<15% warn, <5%
-critical, now counting data stored three times); the **insert-pressure ladder**
-(delayed → too-many-parts); and the consumer-side **ExporterUnhealthy** (the
-collector's `send_failed_*{exporter="clickhouse"}` — the collector can be up
-while its ClickHouse exporter backpressures).
+critical, now counting data stored three times, pinned to `disk="default"` since
+the cold tier gave the exporter `s3` / `s3_cache` series too); the **cold-tier
+signal** `ClickHouseS3Errors` (a replica failing S3 requests against RustFS —
+hot-window reads and INSERTs survive, cold reads and moves do not); the
+**insert-pressure ladder** (delayed → too-many-parts); and the consumer-side
+**ExporterUnhealthy** (the collector's `send_failed_*{exporter="clickhouse"}` —
+the collector can be up while its ClickHouse exporter backpressures).
 
 ### Dashboard
 

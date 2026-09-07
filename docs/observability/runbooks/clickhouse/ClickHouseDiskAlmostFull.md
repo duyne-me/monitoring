@@ -5,7 +5,7 @@
 | **Severity** | warning |
 | **Category** | observability |
 | **Source** | `.../prometheusrules/observability/clickhouse-alerts.yaml` |
-| **Metrics** | `chi_clickhouse_metric_DiskFreeBytes / chi_clickhouse_metric_DiskTotalBytes < 0.15` |
+| **Metrics** | `chi_clickhouse_metric_DiskFreeBytes{disk="default"} / chi_clickhouse_metric_DiskTotalBytes{disk="default"} < 0.15` — the hot disk only; the `s3` / `s3_cache` series exist since the RustFS cold tier and report the object-storage ceiling |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Data analysis |
 | **Local-stack** | present — `ClickHouseAsyncMetrics_DiskAvailable_default / DiskTotal_default < 0.15` on the named docker volume |

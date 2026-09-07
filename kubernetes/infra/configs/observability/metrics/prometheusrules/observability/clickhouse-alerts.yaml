@@ -143,10 +143,18 @@ spec:
         # shared with every other pod on that node. KubeNodeDiskPressure covers
         # the same ground from the kubelet's side and fires later; this pair is
         # the earlier, ClickHouse-attributed warning.
+        #
+        # `disk="default"` pinned since the RustFS cold tier (03-storage-rustfs.xml,
+        # 2026-09-07): the exporter now also publishes these two families for the
+        # `s3` and `s3_cache` disks. An object-storage disk reports total and free
+        # as the UInt64 ceiling, so an unpinned ratio would carry two extra
+        # always-healthy series per replica. VERIFY-AT-KIND: the label set on the
+        # new series has not been read off a live cluster yet; run
+        # `chi_clickhouse_metric_DiskTotalBytes` grouped by `disk` and record it.
         - alert: ClickHouseDiskAlmostFull
           expr: |
-            chi_clickhouse_metric_DiskFreeBytes
-              / chi_clickhouse_metric_DiskTotalBytes < 0.15
+            chi_clickhouse_metric_DiskFreeBytes{disk="default"}
+              / chi_clickhouse_metric_DiskTotalBytes{disk="default"} < 0.15
           for: 15m
           labels:
             severity: warning
@@ -158,8 +166,8 @@ spec:
 
         - alert: ClickHouseDiskCritical
           expr: |
-            chi_clickhouse_metric_DiskFreeBytes
-              / chi_clickhouse_metric_DiskTotalBytes < 0.05
+            chi_clickhouse_metric_DiskFreeBytes{disk="default"}
+              / chi_clickhouse_metric_DiskTotalBytes{disk="default"} < 0.05
           for: 5m
           labels:
             severity: critical
@@ -292,6 +300,29 @@ spec:
             runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseServerErrorsElevated.md"
             summary: "ClickHouse error rate elevated ({{ $labels.replica }})"
             description: "This replica is accumulating errors across every system.errors code faster than 5/s for 10 minutes. The counter is deliberately broad and includes harmless codes — a mistyped query raises UNKNOWN_IDENTIFIER too — which is why this is info and not a page. Break it down by code with the ClickHouseErrorMetric_* series, or the top-N errors table on the server-engine dashboard."
+
+        # Cold tier on RustFS (2026-09-07). While RustFS is unreachable or the
+        # bucket/credentials are wrong: INSERTs still land on the hot volume and
+        # queries pruned to the last 7 days succeed, but anything touching a cold
+        # partition fails, and background moves, cold-part merges and cold-part
+        # TTL drops fail and retry. The server counts every such failure under
+        # the S3_ERROR code, which the :9363 endpoint publishes per code as
+        # ClickHouseErrorMetric_S3_ERROR the same way it publishes _ALL above.
+        # `max by (replica)` for the same reason as ServerErrorsElevated: one
+        # alert per sick replica, not per code. VERIFY-AT-KIND: the family is
+        # proven (every error code is exported); this exact series appears only
+        # once an S3 error has happened, so run the unthresholded form after the
+        # first deliberate RustFS outage and record the result here.
+        - alert: ClickHouseS3Errors
+          expr: max by (replica) (rate(ClickHouseErrorMetric_S3_ERROR{job="clickhouse-server"}[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseS3Errors.md"
+            summary: "ClickHouse cannot reach its RustFS cold tier ({{ $labels.replica }})"
+            description: "This replica has been failing S3 requests for 10 minutes: the RustFS Service is unreachable, or the clickhouse-otel bucket or its credentials are wrong. Hot-window queries and INSERTs are unaffected; queries over partitions older than 7 days fail, and TTL moves and cold-part drops retry until it clears. A replica that restarts during the outage stays down on the disk access check until RustFS returns."
 
         - alert: ClickHouseOperatorReconcileErrors
           expr: rate(clickhouse_operator_host_reconciles_errors[15m]) > 0
