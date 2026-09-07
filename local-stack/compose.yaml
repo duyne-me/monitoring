@@ -462,7 +462,7 @@ services:
   # routing (alertmanager) is a later decision, recorded in
   # local-stack/docs/observability.md § Non-goals.
   vmalert:
-    image: victoriametrics/vmalert:v1.150.0
+    image: victoriametrics/vmalert:v1.151.0
     command:
       - "-datasource.url=http://victoria-metrics:8428"
       - "-remoteWrite.url=http://victoria-metrics:8428"
