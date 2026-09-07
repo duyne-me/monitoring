@@ -8,7 +8,7 @@
 | **Metrics** | `chi_clickhouse_metric_DelayedInserts > 0` |
 | **Status** | active |
 | **Dashboard** | ClickHouse → Data analysis |
-| **Local-stack** | not present |
+| **Local-stack** | present — `rate(ClickHouseProfileEvents_DelayedInserts[5m]) > 0`, a counter from `system.events` (the cluster reads the `system.metrics` gauge) |
 
 ## Meaning
 

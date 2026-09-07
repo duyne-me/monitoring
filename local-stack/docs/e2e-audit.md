@@ -2035,9 +2035,11 @@ print('C20', 'OK all targets up:' if ok else 'FAIL:', t)"
 #       'envoy-gateway': 'up', 'envoy': 'up', 'temporal': 'up', 'keycloak': 'up'}
 
 # C21. vmalert loaded the ported cluster rules and nothing is firing on a
-#      healthy stack. 18 alerting rules are expected: nine ClickHouse engine
-#      rules (same names as the cluster catalog § 8b, minus the two operator
-#      rules that have no local counterpart), the two collector rules, the
+#      healthy stack. 18 alerting rules are expected: eight ClickHouse engine
+#      rules (cluster catalog § 8b names where the signal exists on one node;
+#      the operator and replication rules have no local counterpart, and
+#      ClickHouseMergesFailing was removed 2026-09-07 for reading a counter the
+#      server does not publish), the two collector rules, the
 #      three inventory alerts that travel with the vendored RFC-0021 recording
 #      rules, and the four keycloak alerts (KeycloakDown + the three identity
 #      KPI alerts; KeycloakRestartLoop stays cluster-only — it reads
@@ -2057,16 +2059,16 @@ rules = [r for g in gs for r in g['rules']]
 alerting = [r for r in rules if r['type'] == 'alerting']
 recording = [r for r in rules if r['type'] == 'recording']
 firing = [r['name'] for r in alerting if r.get('state') == 'firing']
-print('C21 rules loaded: %d alerting (want 19) + %d recording (want 15); firing: %s'
+print('C21 rules loaded: %d alerting (want 18) + %d recording (want 15); firing: %s'
       % (len(alerting), len(recording), firing or 'none'))"
-# want: 19 alerting + 15 recording, firing ['Watchdog'] and nothing else. A
+# want: 18 alerting + 15 recording, firing ['Watchdog'] and nothing else. A
 # missing rule file mounts silently — the counts are the tripwire. Any OTHER
 # firing rule on a fresh stack is a real finding: chase it before calling the
 # audit passed. Watchdog MISSING from that list is also a finding — it means the
 # alert pipeline is not evaluating at all.
 
 #      Optional drill (NOT part of the pass bar — it takes ~6 minutes): stop
-#      clickhouse, wait out the 5m `for`, confirm ClickHouseServerUnreachable
+#      clickhouse, wait out the 5m `for`, confirm ClickHouseAllReplicasUnreachable
 #      fires, then start it again. Run it when the rules themselves changed.
 # docker compose stop clickhouse && sleep 360 \
 #   && curl -s http://localhost:8880/api/v1/alerts | python3 -c "import json,sys; \
@@ -2137,7 +2139,7 @@ print('C21 rules loaded: %d alerting (want 19) + %d recording (want 15); firing:
 | C18 | Dashboard inventory | `/api/search?type=dash-db` returns exactly the 18 provisioned uids (incl. the three vendored Envoy Gateway dashboards plus the hand-authored Edge Overview board under Gateway/, the collector-health board, the Keycloak Identity board, and the two RFC-0021-era parity copies) and each loads via `/api/dashboards/uid/…` with 200 |
 | C19 | Panels return data | `/api/ds/query` returns a non-empty frame for one representative query per datasource (VictoriaMetrics PromQL, ClickHouse SQL) — a healthy datasource that cannot shape a frame still renders "No data" |
 | C20 | Engine-health scrape | vmagent (`:8429/api/v1/targets`) shows all six jobs — `clickhouse`, `otel-collector`, `envoy-gateway` (edge control plane :19001), `envoy` (proxy native stats :19005), `temporal` (server :8000) and `keycloak` (management :9000) — with `health: up`; a missing target means the C21 rules evaluate against nothing |
-| C21 | Alert rules loaded, none firing | vmalert (`:8880/api/v1/rules`) reports exactly **18 alerting** rules (9 ClickHouse engine + 2 collector + 3 inventory + 4 keycloak) plus **15 recording** rules (RFC-0021 + inventory) and zero `firing` on a healthy stack — the counts are the tripwire for a silently unmounted rule file |
+| C21 | Alert rules loaded, none firing | vmalert (`:8880/api/v1/rules`) reports exactly **18 alerting** rules (8 ClickHouse engine + 2 collector + 3 inventory + 4 keycloak + Watchdog) plus **15 recording** rules (RFC-0021 + inventory) and zero `firing` on a healthy stack — the counts are the tripwire for a silently unmounted rule file |
 
 Any failed row blocks the release tag. Two rows share one root cause and must be
 reported as such: **C13 + C14** both empty while C12 is healthy means the Vector
