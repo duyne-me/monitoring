@@ -323,11 +323,19 @@ docs/observability/
 └── runbooks/                     # Operational runbooks
     ├── README.md                 # Runbook index
     ├── _TEMPLATE.md              # Canonical per-alert runbook template
+    ├── clickhouse/                 # OTel OLAP store per-alert runbooks (14 files)
     ├── envoy-gateway/              # Edge per-alert runbooks (10 files)
-    ├── microservices/              # Per-alert runbooks (51 files)
-    ├── postgresql/                 # CNPG per-alert runbooks (34 files)
-    ├── kubernetes/                 # K8s infra per-alert runbooks (22 files)
-    └── valkey/                     # Cache per-alert runbooks (8 files)
+    ├── gitops/                     # Flux per-alert runbooks (9 files)
+    ├── keda/                       # Autoscaler per-alert runbooks (4 files)
+    ├── keycloak/                   # Identity per-alert runbooks (5 files, no README)
+    ├── kubernetes/                 # K8s infra per-alert runbooks (29 files)
+    ├── kyverno/                    # Admission per-alert runbooks (4 files)
+    ├── microservices/              # Per-alert runbooks (50 files)
+    ├── observability/              # Stack self-monitoring runbooks (4 files)
+    ├── postgresql/                 # CNPG per-alert runbooks (35 files)
+    ├── temporal/                   # Server + worker per-alert runbooks (9 files)
+    ├── valkey/                     # Cache per-alert runbooks (7 files)
+    └── victoriametrics/            # Metrics-plane per-alert runbooks (31 files)
 ```
 
 The compose stack has its own observability plane — vmagent/vmalert, the

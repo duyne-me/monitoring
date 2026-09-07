@@ -522,6 +522,8 @@ recorded as such rather than implied. The third marker — whether a
 hosts, so one sick replica could have paged as a total outage. That expression is
 now a ratio over distinct hosts.
 
+Per-alert runbooks: [`runbooks/clickhouse/README.md`](../runbooks/clickhouse/README.md).
+
 | Alert | Sev | Metric & trigger | Impact | for | Runbook |
 |-------|-----|------------------|--------|-----|---------|
 | ClickHouseReplicaUnreachable | warning | `max by (hostname)` of exporter fetch errors >0 | One replica cannot be fetched; peers still serve reads and writes, but it stops catching up. Aggregated by hostname because the series is per `(hostname, fetch_type)` — 21 series for 3 hosts, measured | 5m | [ClickHouseReplicaUnreachable](../runbooks/clickhouse/ClickHouseReplicaUnreachable.md) |
