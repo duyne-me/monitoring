@@ -8,9 +8,9 @@
 | **Created** | 2026-09-06 |
 | **Last updated** | 2026-09-08 |
 
-> **Research only.** PeerDB, commerce objects, heartbeat writers, and analytics
-> workloads are **reference — not deployed** until the RFC and resulting ADRs
-> are accepted and implementation is verified.
+> **Research only.** PeerDB, `pg_cron`, commerce objects, and analytics workloads
+> are **reference — not deployed** until the RFC and resulting ADRs are accepted
+> and implementation is verified.
 
 ## Table of contents
 
@@ -60,7 +60,8 @@ Research succeeds when a reviewer can explain:
 5. failure and recovery for every stateful dependency;
 6. the accepted source-credential risk;
 7. why a thin API remains necessary; and
-8. why no PostgreSQL analytical extension is selected.
+8. why `pg_cron` is selected as a supporting scheduler while analytical
+   extensions remain out of scope.
 
 ## Reading path
 
@@ -98,7 +99,7 @@ and heartbeats are database-local even though `order`, `checkout`, and
 |-----------|----------------|-----------------|
 | Three CNPG `Publication` resources | Reconcile reviewed tables, columns, operations as GitOps | reference — not deployed |
 | Three PeerDB source logins | Snapshot and logical replication for one database each | reference — not deployed |
-| Three heartbeat rows/writers | Prove the complete idle-traffic path | reference — not deployed |
+| One `pg_cron` scheduler plus three heartbeat rows/jobs | Prove the complete idle-traffic path without an external writer workload | reference — not deployed |
 | PeerDB flow/snapshot workers | Initial copy, WAL consumption, staging, ClickHouse load | reference — not deployed |
 | PeerDB control API/server | Mirror lifecycle; cluster-internal only | reference — not deployed |
 | PeerDB catalog | Dedicated database/role on `platform-db` | reference — not deployed |
@@ -121,6 +122,7 @@ the serving model?** Every CDC-specific object is reference-only.
 ```mermaid
 flowchart LR
   subgraph PG["product-db — deployed CNPG"]
+    CRON["pg_cron scheduler<br/>reference — primary only"]
     ORD[("order<br/>publication + slot + heartbeat<br/>reference")]
     CHECK[("checkout<br/>publication + slot + heartbeat<br/>reference")]
     PAY[("payment<br/>publication + slot + heartbeat<br/>reference")]
@@ -144,6 +146,7 @@ flowchart LR
 
   API["analytics-service<br/>reference"]
 
+  CRON -.->|"30-second UPSERT<br/>reference"| ORD & CHECK & PAY
   ORD & CHECK & PAY -.->|"database-local pgoutput<br/>reference"| RW
   RW -.->|"direct TLS<br/>reference"| FLOW
   SNAP --- FLOW
@@ -156,7 +159,7 @@ flowchart LR
   classDef data fill:#22c55e,color:#052e16,stroke:#15803d;
   classDef planned fill:#fff,color:#475569,stroke:#64748b,stroke-dasharray:5 5;
   class RW,PG,CH data;
-  class ORD,CHECK,PAY,FLOW,SNAP,CTRL,CAT,TEMP,STAGE,RAW,SERVE,API planned;
+  class CRON,ORD,CHECK,PAY,FLOW,SNAP,CTRL,CAT,TEMP,STAGE,RAW,SERVE,API planned;
 ```
 
 **Legend** — green: deployed data boundary · dashed border/dotted edge:
@@ -308,11 +311,62 @@ CREATE TABLE analytics_cdc_heartbeat (
 );
 ```
 
-A separate per-database writer receives only `INSERT`/`UPDATE` on this table and
-updates its fixed row every 30 seconds with PostgreSQL `clock_timestamp()`.
-This avoids treating the writer pod's clock as source time; platform clock skew
-still needs monitoring. The future analytics image can expose this small
-command; it is not an ingestion engine.
+`pg_cron` updates each fixed row every 30 seconds with PostgreSQL
+`clock_timestamp()`. This avoids treating an application pod's clock as source
+time and removes an external writer workload, Secret, HBA pair, and network
+path; platform clock skew still needs monitoring. One non-owning
+`analytics_heartbeat` execution role receives only `INSERT`/`UPDATE` on the
+three technical tables and no business-table privileges.
+
+### `pg_cron` lifecycle
+
+Artifact availability, startup loading, and database activation are separate
+states. `CREATE EXTENSION` cannot install a missing library, and CNPG warns that
+preloading a library absent from the image prevents PostgreSQL startup and
+cannot be self-healed by the operator.
+
+1. Derive a custom system image from the exact deployed PostgreSQL
+   `18.1-system-trixie` base, install the PGDG `postgresql-18-cron` package, scan
+   it, and pin the resulting image by digest. Use the compatible image on both
+   `product-db` and `product-db-replica`; `platform-db` does not need it.
+   ImageVolume delivery is deferred because the current Kubernetes 1.34 Kind
+   cluster does not enable its required feature gate and the platform has no
+   extension image/catalog supply chain.
+2. Before changing preload, verify `pg_cron.so`, its control/SQL files, and a
+   `pg_available_extensions` row on every supported architecture. Restore a
+   backup with the same image to prove the artifact is present in recovery.
+3. Add `pg_cron` through CNPG's dedicated
+   `spec.postgresql.shared_preload_libraries` list and roll the cluster. Configure
+   one metadata database, UTC, background-worker execution, and bounded
+   concurrency:
+
+   ```yaml
+   postgresql:
+     shared_preload_libraries:
+       - pgaudit
+       - pg_stat_statements
+       - auto_explain
+       - pg_cron
+     parameters:
+       cron.database_name: postgres
+       cron.enable_superuser_jobs: "off"
+       cron.timezone: UTC
+       cron.use_background_workers: "on"
+       cron.max_running_jobs: "4"
+   ```
+
+4. Create the extension only in `postgres`; `pg_cron` permits one installation
+   database per cluster. An idempotent, GitOps-owned DDL step then creates three
+   named `cron.schedule_in_database()` jobs for `order`, `checkout`, and
+   `payment` under the same `analytics_heartbeat` execution role. Each command
+   performs the fixed-row UPSERT every `30 seconds`. A fourth job owned by that
+   role deletes its `cron.job_run_details` rows older than seven days each day.
+
+Background workers avoid `trust` authentication and `.pgpass`. They consume
+`max_worker_processes` capacity, so the prototype must inventory existing
+workers and prove headroom rather than copying an arbitrary upstream value.
+`pg_cron` does not launch jobs on a hot standby and starts after promotion; the
+DR drill must prove that behavior with this exact CNPG image and configuration.
 
 ### Two allowlist layers
 
@@ -347,10 +401,12 @@ but do not prove a timestamp reached the serving model. Upstream also rejected
 PostgreSQL keepalive-based zero lag because a large transaction may still be
 decoding.
 
-PeerDB's built-in heartbeat interval is 12 minutes. Its official guide shows a
-faster `pg_cron` heartbeat, but `pg_cron` is not installed here and would add
-extension packaging, activation, upgrade, and restore work. A narrow
-30-second writer changes fewer database lifecycle assumptions.
+PeerDB's built-in heartbeat interval is 12 minutes. Its official guide uses
+`pg_cron` for a faster heartbeat, and the owner selected that source-local
+scheduler instead of an external writer. The extension adds image packaging,
+preload restart, activation, upgrade, restore, and DR duties, but removes a
+single-purpose workload and credential path. The target timestamp—not cron job
+success—remains the freshness authority.
 
 ```mermaid
 flowchart TD
@@ -386,12 +442,12 @@ and the API returns `503`.
 |--------|----------------|-----------------|
 | Product DB | CNPG PostgreSQL 18.1, three instances, synchronous `ANY 1` | Three direct-primary PeerDB connections |
 | Logical settings | `wal_level=logical`, `max_wal_senders=10`, slot sync settings enabled | Size slots/senders/WAL cap; prove external slot failover |
-| HBA/pooling | Exact pairs then reject-all; PgDog for app traffic | Exact PeerDB/heartbeat pairs; CDC bypasses PgDog |
+| HBA/pooling | Exact pairs then reject-all; PgDog for app traffic | Exact PeerDB pairs; CDC bypasses PgDog; background-worker heartbeat adds no HBA pair |
 | Temporal | Deployed with PostgreSQL persistence | Dedicated namespace `peerdb` |
 | RustFS | Backups and ClickHouse cold tier | Dedicated staging bucket/identity |
 | `platform-db` | Hosts platform databases | Dedicated PeerDB catalog DB/role |
 | ClickHouse | 26.7, 1 shard × 3 replicas, `otel` data | Isolated commerce raw/serving objects |
-| Extensions | `pgaudit`, `pg_stat_statements`, `auto_explain`; limited `pgcrypto`/`uuid-ossp` | No new extension |
+| Extensions | `pgaudit`, `pg_stat_statements`, `auto_explain`; limited `pgcrypto`/`uuid-ossp`; system-image packaging | Custom system image plus `pg_cron` preload and one activation in `postgres` |
 | PeerDB | Not deployed | New stateful control/worker plane |
 
 Current logical settings are prerequisites, not proof. CNPG documents logical
@@ -417,12 +473,18 @@ Mandatory compensating controls:
 - publication allowlists plus exhaustive PeerDB exclusions; and
 - downstream PII inspection before route exposure.
 
+Heartbeat execution is a separate privilege plane. One non-owning role can
+modify only the three fixed-row technical tables. Background-worker execution
+removes remote login material and does not justify broadening HBA. The GitOps
+DDL step creates the jobs under that role; application and PeerDB roles receive
+no `cron` schema administration.
+
 | Identity | Allowed | Denied |
 |----------|---------|--------|
-| Source migration owner | Heartbeat table DDL and exact grants | PeerDB/ClickHouse runtime |
+| Source DDL owner | Heartbeat table DDL, exact grants, named cron schedules | PeerDB/ClickHouse runtime |
 | CNPG publication reconciler | Three named database-local publications | PeerDB mirror/slot lifecycle |
 | PeerDB login ×3 | Connect, replication, selected-table snapshot | Ownership, DDL, business writes |
-| Heartbeat writer ×3 | Upsert one fixed heartbeat row | Business-table access |
+| `analytics_heartbeat` role | Three fixed-row UPSERT jobs and own run-history cleanup | Business-table access and cron administration outside its own jobs |
 | Catalog role | Its `platform-db` catalog only | Other databases |
 | Staging identity | `peerdb-staging` only | Backup/cold-tier buckets |
 | ClickHouse ingest | Mapped raw objects | Staff/source access |
@@ -442,13 +504,15 @@ that wording, but acceptance requires an explicit license review.
 |---------|----------|--------------------|
 | Source lag 2–5m | `200 stale=true` | Identify source; inspect heartbeat/slot/path |
 | Lag >5m or unknown | `503` | Never claim unverifiable freshness |
+| `pg_cron` job failure or no worker capacity | Lag rises, then stale/`503` | Inspect scheduler, run history, role ACLs, and `max_worker_processes` headroom |
+| Missing/incompatible `pg_cron` artifact | PostgreSQL may not start after preload | Block rollout on image and restore checks; never add preload first |
 | PeerDB restart | Lag rises | Prove checkpoint resume and deduplication |
 | Snapshot interruption | Route stays absent | Preserve compatible snapshot worker; resume/restart |
 | ClickHouse/RustFS outage | Eventually `503` | Bound staging and retained WAL |
 | Temporal/catalog/control loss | Progress may stop | Preserve slot and diagnose isolated dependency |
 | Network partition | Slot retains WAL | Restore before WAL cap invalidates slot |
 | WAL-cap invalidation | `503` | Resync from a new safe position |
-| CNPG promotion | Unknown until drilled | Reconnect via RW Service or resync |
+| CNPG promotion | Unknown until drilled | Prove `pg_cron` starts only on promoted primary and PeerDB reconnects via RW Service |
 | Schema DDL | Gate/pause mirror | Coordinate every contract layer |
 | Secret rotation | Brief reconnect only | Prove new connection and old-secret rejection |
 | PII leak | Remove route; pause mirror | Preserve evidence and run reviewed purge |
@@ -465,7 +529,8 @@ so “delete and recreate” is never the first incident action.
 Required drills cover concurrent snapshot writes; insert/update/delete;
 duplicates; large transactions; every dependency outage; network partitions;
 credential rotation; CNPG switchover/failover; WAL invalidation/resync;
-add/drop/type DDL; and PII inspection.
+add/drop/type DDL; cron failure/disable/history cleanup; background-worker
+exhaustion; custom-image restore; and PII inspection.
 
 ## Schema evolution
 
@@ -535,9 +600,9 @@ surface. Batch returns only if PeerDB fails a hard prototype gate.
 
 ### PostgreSQL extensions
 
-| Extension/family | Useful capability | Why not selected |
-|------------------|-------------------|------------------|
-| `pg_cron` | Source-local heartbeat schedule | Not deployed; extension lifecycle for one operational row |
+| Extension/family | Useful capability | Position |
+|------------------|-------------------|----------|
+| `pg_cron` | Source-local heartbeat schedule | Selected supporting extension; does not replace CDC or the ClickHouse serving boundary |
 | `pg_duckdb` | Embedded analytics/external formats | Native packaging/preload/DR; still three source boundaries |
 | `pg_mooncake` | Columnar warehouse behavior | New storage/extension lifecycle; does not solve semantics |
 | TimescaleDB | Time-series aggregates/refresh | Does not provide this CDC/ClickHouse boundary |
@@ -548,6 +613,11 @@ None replaces PostgreSQL → ClickHouse CDC. Any native extension must pass the
 platform's PostgreSQL 18 artifact, OS, architecture, preload, upgrade, and
 restore policy.
 
+An external heartbeat command remains the fallback if the custom image,
+background-worker capacity, restore, or promotion prototype fails. It is not the
+default because it adds a single-purpose workload, credential, HBA pair, and
+network path to perform three fixed-row updates.
+
 ## Remaining validation
 
 Before `Accepted`:
@@ -556,13 +626,17 @@ Before `Accepted`:
    v0.37.5 while released enterprise chart v0.9.16 packages an older app.
 2. Approve AGPL-3.0/ELv2 use.
 3. Prove column-list publications plus PeerDB exclusions for snapshot/update/delete.
-4. Prove 30-second target heartbeats ≤2m during idle, busy, and recovery.
-5. Verify version/tombstone behavior on the pinned build.
-6. Execute add/drop/type DDL and document recovery.
-7. Prove PeerDB slot behavior through CNPG switchover/failover or require resync.
-8. Measure full snapshot, WAL, staging, raw storage, and resource floor.
-9. Complete failure drills, alerts, dashboard, and runbook.
-10. Load one million facts; match 7/30/90-day checksums; prove `argMax` p95
+4. Build and pin the PostgreSQL 18 custom image; prove artifact availability,
+   preload, activation, background-worker headroom, backup restore, rollback,
+   and primary-only execution through CNPG switchover/failover.
+5. Prove 30-second `pg_cron` target heartbeats ≤2m during idle, busy, and
+   recovery; retain seven days of bounded run history.
+6. Verify version/tombstone behavior on the pinned build.
+7. Execute add/drop/type DDL and document recovery.
+8. Prove PeerDB slot behavior through CNPG switchover/failover or require resync.
+9. Measure full snapshot, WAL, staging, raw storage, and resource floor.
+10. Complete failure drills, alerts, dashboard, and runbook.
+11. Load one million facts; match 7/30/90-day checksums; prove `argMax` p95
     ≤500 ms, query memory ≤512 MiB, and no pod restart.
 
 ## FAQ
@@ -571,10 +645,10 @@ Before `Accepted`:
 
 No. No transactional request waits for PeerDB or ClickHouse.
 
-### Does two minutes mean a two-minute CronJob?
+### Does two minutes mean a two-minute cron schedule?
 
-No. It is an end-to-end SLO. PeerDB streams continuously; a 30-second heartbeat
-makes idle progress measurable.
+No. It is an end-to-end SLO. PeerDB streams continuously; a 30-second `pg_cron`
+heartbeat leaves time for WAL decoding, staging, normalization, and detection.
 
 ### Why not mirror status or the newest business row?
 
@@ -585,10 +659,13 @@ business row; recent source rows can be stuck before ClickHouse.
 
 Its documented 12-minute interval exceeds the SLO.
 
-### Why not `pg_cron`?
+### Why `pg_cron` instead of an external writer?
 
-It is valid and appears in official PeerDB guidance, but is not installed. A
-narrow command in the planned analytics image changes less CNPG lifecycle.
+It appears in official PeerDB guidance, uses the PostgreSQL server clock, runs
+only on the primary, and removes a single-purpose workload and credential path.
+The tradeoff is an owned custom-image, preload, restart, activation, restore,
+and DR lifecycle, which is why it gets a separate resulting ADR and prototype
+gate.
 
 ### Is table `SELECT` least privilege?
 
@@ -633,8 +710,11 @@ will not run in parallel.
 - [PostgreSQL 18 logical replication security](https://www.postgresql.org/docs/18/logical-replication-security.html)
 - [PostgreSQL 18 `CREATE PUBLICATION`](https://www.postgresql.org/docs/18/sql-createpublication.html)
 - [PostgreSQL 18 replication configuration](https://www.postgresql.org/docs/18/runtime-config-replication.html)
+- [`pg_cron` installation, multi-database scheduling, and operations](https://github.com/citusdata/pg_cron)
 - [CloudNativePG 1.30 declarative logical replication](https://cloudnative-pg.io/docs/1.30/logical_replication/)
 - [CloudNativePG 1.30 replication](https://cloudnative-pg.io/docs/1.30/replication/)
+- [CloudNativePG 1.30 shared preload libraries](https://cloudnative-pg.io/docs/1.30/postgresql_conf/#shared-preload-libraries)
+- [CloudNativePG 1.30 ImageVolume extensions](https://cloudnative-pg.io/docs/1.30/imagevolume_extensions/)
 - [ClickHouse `ReplacingMergeTree`](https://clickhouse.com/docs/engines/table-engines/mergetree-family/replacingmergetree)
 - [PostgreSQL extension inventory](../../../databases/extensions.md)
 - [Database architecture](../../../databases/architecture.md)
@@ -657,7 +737,12 @@ cross-checked against versioned official releases/pages above.
 Context7 did not establish an idle-stream freshness API. Official
 documentation/source audit found incomplete Mirror Status progress,
 event-triggered CDC batches, and rejected keepalive-based zeroing. That negative
-finding directly produced the target-observed heartbeat requirement.
+finding directly produced the target-observed heartbeat requirement. A follow-up
+official-source audit confirmed PostgreSQL 18 support, 30-second schedules,
+one installation database per cluster, `schedule_in_database()`, background
+workers, primary-only execution, run-history behavior, and CNPG's missing-preload
+failure mode; those findings selected `pg_cron` but did not remove its prototype
+gate.
 
 ## Research review gate
 
@@ -668,10 +753,10 @@ finding directly produced the target-observed heartbeat requirement.
 | Source schema and PII boundary | Pass with accepted table-read drawback |
 | PeerDB mechanism and dependencies | Pass for provisional RFC |
 | Freshness authority | Pass for design via target heartbeat |
-| Platform and extension reality | Pass |
+| Platform and extension reality | Pass for custom-image `pg_cron` design; runtime prototype remains open |
 | Context7 plus primary sources | Pass |
 | Failure, security, and rollback | Pass |
-| Production acceptance evidence | Open by design; ten prototype gates block `Accepted` |
+| Production acceptance evidence | Open by design; eleven prototype gates block `Accepted` |
 
 This research is sufficient for RFC-0030 to remain **provisional** and enter
 architecture/prototype review. It is not evidence that PeerDB is installed,
