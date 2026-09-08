@@ -484,7 +484,7 @@ services:
   # The Go services push pprof data here (PROFILING_ENABLED=true + PYROSCOPE_ENDPOINT
   # in x-svc-env). View flame graphs in Grafana → Explore → Pyroscope.
   pyroscope:
-    image: grafana/pyroscope:2.2.1
+    image: grafana/pyroscope:2.3.1
     ports:
       - "4040:4040" # Pyroscope UI/API; services reach it in-network at pyroscope:4040
     volumes:
