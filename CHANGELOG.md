@@ -405,6 +405,19 @@ Skeleton (copy what you need):
 
 #### Observability
 
+- **`CNPGClusterStandbyNotStreaming` no longer fires on a DR designated
+  primary.** The expression is scoped to `cnpg_io_instanceRole!="primary"`. The
+  designated primary of a replica cluster stays in recovery for the life of the
+  cluster and replays from the object-store WAL archive rather than a stream, so
+  it has no WAL receiver by design — `product-db-replica-1` held the rule
+  critical for 11 hours on a freshly built cluster that CNPG, Postgres and both
+  cascading standbys all reported healthy. The filter costs no coverage: a
+  streaming standby always carries role `replica`, and a writable primary
+  reports `in_recovery = 0`, so neither could have matched the unfiltered form
+  either. Two-form checked on Kind — filtered returns nothing on the healthy
+  cluster, unthresholded returns the six real standbys including the DR
+  cluster's two cascading ones. Runbook scope row and footer corrected to match.
+
 - **The ClickHouse disk pair is pinned to `disk="default"`.** With the RustFS
   cold tier the exporter publishes `DiskFreeBytes` / `DiskTotalBytes` for the
   `s3` and `s3_cache` disks too, and an object-storage disk reports total and

@@ -5,7 +5,7 @@
 | **Severity** | critical |
 | **Source** | `prometheusrules/postgres/replication-health.yaml` (homelab-authored) |
 | **Metrics** | `cnpg_pg_replication_in_recovery`, `cnpg_pg_replication_is_wal_receiver_up` |
-| **Clusters** | `platform-db`, `product-db`, `product-db-replica` (DR) — all instances, no pod-name filter |
+| **Clusters** | `platform-db`, `product-db`, `product-db-replica` (DR) — every instance whose role is `replica`. The **designated primary** of the DR cluster is excluded: it is in recovery for the life of the cluster and replays from the object-store WAL archive, so it has no WAL receiver by design. |
 | **Grafana** | CloudNativePG Cluster Overview |
 
 ## Meaning
@@ -89,4 +89,9 @@ kubectl -n $NS logs $POD -c postgres --tail=200 | grep -i timeline
 - [`docs/databases/disaster-recovery.md`](../../../databases/disaster-recovery.md)
 
 ---
-_Last updated: 2026-09-06 — created after a live incident where a timeline-3 failover stranded `product-db-3` and the whole `product-db-replica` DR cluster on timeline 2, and no alert covered it._
+_Last updated: 2026-09-08 — scoped to `cnpg_io_instanceRole!="primary"` after the
+unfiltered expression fired critical for 11 hours on `product-db-replica-1`, the
+DR cluster's designated primary, while CNPG, Postgres and both cascading
+standbys were healthy. Created 2026-09-06 after a live incident where a
+timeline-3 failover stranded `product-db-3` and the whole `product-db-replica`
+DR cluster on timeline 2, and no alert covered it._
