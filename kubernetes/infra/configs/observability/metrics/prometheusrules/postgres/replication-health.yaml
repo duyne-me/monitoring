@@ -54,9 +54,19 @@ spec:
         # up and simply has nothing to replay. Verified on the cluster -- the
         # expression matched exactly the two broken instances and neither of the
         # two healthy in-recovery `platform-db` standbys.
+        #
+        # `cnpg_io_instanceRole!="primary"` excludes the DESIGNATED PRIMARY of a
+        # replica cluster, and it is load-bearing. That instance is in recovery
+        # for the life of the cluster and replays from the object-store WAL
+        # archive, so it has no WAL receiver by design -- `product-db-replica-1`
+        # matched the unfiltered expression for 11 hours on a cluster CNPG and
+        # Postgres both called healthy, while its two cascading standbys streamed
+        # from it normally. The filter costs no coverage: a real streaming standby
+        # always carries role `replica`, and a writable primary reports
+        # `in_recovery = 0`, so neither could ever have matched anyway.
         - alert: CNPGClusterStandbyNotStreaming
           expr: |
-            cnpg_pg_replication_in_recovery == 1
+            cnpg_pg_replication_in_recovery{cnpg_io_instanceRole!="primary"} == 1
             and on (namespace, pod) cnpg_pg_replication_is_wal_receiver_up == 0
           for: 5m
           labels:
