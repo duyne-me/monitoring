@@ -92,6 +92,7 @@ groups:
           severity: warning
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsRejected.md"
           summary: "ClickHouse rejecting inserts"
           description: "The too-many-parts guard is rejecting inserts; the collector will retry, then drop."
 
@@ -102,6 +103,7 @@ groups:
           severity: warning
           category: observability
         annotations:
+          runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsFailing.md"
           summary: "ClickHouse insert queries failing"
           description: "Insert queries are erroring — telemetry rows are being lost at the door."
 

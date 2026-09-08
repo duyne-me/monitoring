@@ -774,7 +774,9 @@ Rules live in
 `configs/observability/metrics/prometheusrules/observability/clickhouse-alerts.yaml`,
 catalogued in [alert-catalog § 8b](../alerting/alert-catalog.md#8b-clickhouse-otel-olap-engine).
 Three of the twelve this section once claimed were deleted on 2026-08-22 for
-naming series the exporter does not publish — count the file, not the prose.
+naming series the exporter does not publish — count the file, not the prose. The
+file holds **22** since the 2026-09-08 awesome-prometheus-alerts audit added
+seven.
 
 The spine: the **reachability pair** — `ClickHouseReplicaUnreachable` (warning:
 one of three cannot be fetched, its peers still serve) escalating to
@@ -787,9 +789,21 @@ critical, now counting data stored three times, pinned to `disk="default"` since
 the cold tier gave the exporter `s3` / `s3_cache` series too); the **cold-tier
 signal** `ClickHouseS3Errors` (a replica failing S3 requests against RustFS —
 hot-window reads and INSERTs survive, cold reads and moves do not); the
-**insert-pressure ladder** (delayed → too-many-parts); and the consumer-side
-**ExporterUnhealthy** (the collector's `send_failed_*{exporter="clickhouse"}` —
-the collector can be up while its ClickHouse exporter backpressures).
+**insert-pressure ladder** (too-many-parts → delayed → rejected, with
+`ClickHouseTooManyPartsPerPartition` covering the dimension the guards actually
+enforce and `ClickHouseInsertsFailing` catching every other INSERT error); and
+the consumer-side **ExporterUnhealthy** (the collector's
+`send_failed_*{exporter="clickhouse"}` — the collector can be up while its
+ClickHouse exporter backpressures).
+
+The 2026-09-08 audit added a **replication trio** the group had no equivalent
+for — `ClickHouseReplicationLag` (a replica five minutes behind serves stale
+data to a third of Grafana queries with no error anywhere),
+`ClickHouseKeeperSessionLost` (the gauge that drops the instant a Keeper session
+goes, unlike the exceptions rate or the readonly end state) and
+`ClickHouseReplicatedDataLoss` (critical at the first increment) — plus
+`ClickHouseServerNotScraped`, the `absent()` guard on the `:9363` PodMonitor
+that ten of these rules depend on and would have gone silent with.
 
 ### Dashboard
 

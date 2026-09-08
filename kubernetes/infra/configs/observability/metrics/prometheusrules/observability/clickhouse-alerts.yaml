@@ -44,6 +44,14 @@ spec:
     # identical to a healthy one. `make validate` does not lint rules either and
     # there is no promtool in this repo, so running both forms by hand is the
     # only check that exists. Do it when editing any expr here.
+    #
+    # The seven rules added 2026-09-08 from the awesome-prometheus-alerts audit
+    # (ServerNotScraped, TooManyPartsPerPartition, InsertsRejected,
+    # InsertsFailing, ReplicationLag, KeeperSessionLost, ReplicatedDataLoss)
+    # have NOT had that pass yet: each carries its own VERIFY-AT-KIND marker
+    # stating what the two forms must return. Every one reads the :9363 scrape
+    # with a `job="clickhouse-server"` selector for the reason ServerErrorsElevated
+    # documents below.
     - name: observability-clickhouse
       interval: 30s
       rules:
@@ -114,6 +122,38 @@ spec:
             summary: "ClickHouse operator is down"
             description: "The Altinity operator target (job {{ $labels.job }}) has been down for 10 minutes — CHI reconciles are frozen. The running server keeps serving; config changes and self-healing stop."
 
+        # The :9363 PodMonitor going blind was the one failure this file could
+        # not see. ReplicaUnreachable/AllReplicasUnreachable read the exporter,
+        # OperatorDown reads `up` on the operator job — but nothing checked `up`
+        # for job="clickhouse-server", and every rule below that names a
+        # ClickHouse* family (ReadonlyReplica, ServerErrorsElevated, S3Errors,
+        # ZooKeeperExceptions, the four replication rules) reads only that
+        # scrape. If the PodMonitor selector drifts or the `metrics` container
+        # port is renamed, all of them go state=inactive with an empty lastError
+        # — the exact signature of a healthy rule. `absent(... == 1)` is the
+        # only shape that fires on zero targets AND on every target down; a bare
+        # `up == 0` needs a target to exist. Same idiom as EdgeDown and
+        # PostgresBackupMetricsMissing.
+        # Warning, not critical: AllReplicasUnreachable (exporter side) carries
+        # the page when the store is really down, and this pairs with it the
+        # way ReplicaUnreachable does. A single dead pod is NOT this rule's job
+        # either — the exporter names the host.
+        # Audit source (2026-09-08): awesome-prometheus-alerts ClickHouseNodeDown,
+        # which is a bare `up == 0` and would miss the zero-target case.
+        # VERIFY-AT-KIND: `up{job="clickhouse-server"}` returns 3 series at 1;
+        # the complete form returns nothing. Then scale the PodMonitor selector
+        # to a wrong label and confirm it fires within 10m of the series aging out.
+        - alert: ClickHouseServerNotScraped
+          expr: absent(up{job="clickhouse-server"} == 1)
+          for: 10m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseServerNotScraped.md"
+            summary: "ClickHouse server metrics (:9363) are not being scraped"
+            description: "No target under job=\"clickhouse-server\" is up: the per-pod PodMonitor selects nothing or every replica's :9363 endpoint is down. Every ClickHouse* rule in this group — readonly replica, error rates, S3 errors, replication lag, Keeper session — is blind while this fires, and vmalert reports them as healthy. Check the PodMonitor selector and the `metrics` container port on the CHI before trusting any other ClickHouse alert."
+
         # MergeTree refuses inserts as the disk approaches full; 15% is the
         # act-now line, 5% is minutes from write failures.
         #
@@ -177,9 +217,13 @@ spec:
             summary: "Node filesystem under 5% free behind ClickHouse {{ $labels.hostname }}"
             description: "Write failures are imminent on the OTel logs/traces store. Drop the oldest partitions (ALTER TABLE … DROP PARTITION) or free space on the node. Growing the PVC is NOT an option on local-path: allowVolumeExpansion is unset and the volume has no quota to grow."
 
-        # Early merge-starvation signal, well before parts_to_throw_insert
-        # (default 300 active parts per partition throws; we alert at the
-        # table-wide count trend instead).
+        # Early merge-starvation signal: the SERVER-WIDE active part count as a
+        # trend. The guards that actually delay and throw —
+        # parts_to_delay_insert / parts_to_throw_insert — count active parts in
+        # ONE partition, not across the server; the "default 300 per partition
+        # throws" this comment used to state was stale, and the live values
+        # belong in system.merge_tree_settings, not here. The per-partition
+        # dimension is ClickHouseTooManyPartsPerPartition below (2026-09-08).
         # Casing verified on the Kind cluster 2026-08-22:
         # chi_clickhouse_metric_PartsActive, exactly as written.
         - alert: ClickHouseTooManyParts
@@ -192,6 +236,36 @@ spec:
             runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseTooManyParts.md"
             summary: "ClickHouse active parts high ({{ $labels.hostname }})"
             description: "Active part count is sustained above 300 — merges are not keeping up with inserts. Left alone this ends in delayed, then rejected inserts."
+
+        # The guard's own dimension. parts_to_delay_insert and
+        # parts_to_throw_insert count active parts in ONE partition, and otel.*
+        # partitions are calendar days — so a bad hour of tiny inserts piles
+        # parts into today's partition while PartsActive, spread over ~90
+        # partitions per table, barely moves. MaxPartCountForPartition is the
+        # server's max over every partition of every MergeTree table.
+        # ClickHouse's own description of the metric says values above 300
+        # indicate "misconfiguration, overload, or massive data loading", and
+        # that is the threshold — not the 100 the audit source
+        # (awesome-prometheus-alerts ClickHouseTooManyPartsPerPartition) uses,
+        # which at the collector's batch cadence would page for a backlog
+        # merges clear on their own. Per replica from :9363 because parts are
+        # local state: a replica that fell behind on merges holds more parts
+        # than its peers for the same data.
+        # VERIFY-AT-KIND: unthresholded, 3 series (single digits expected on a
+        # healthy store). Also read the live guards —
+        #   SELECT name, value FROM system.merge_tree_settings
+        #   WHERE name IN ('parts_to_delay_insert','parts_to_throw_insert')
+        # — and record them here so 300 has a stated distance from what throws.
+        - alert: ClickHouseTooManyPartsPerPartition
+          expr: max by (replica) (ClickHouseAsyncMetrics_MaxPartCountForPartition{job="clickhouse-server"}) > 300
+          for: 10m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseTooManyPartsPerPartition.md"
+            summary: "ClickHouse partition with too many parts ({{ $labels.replica }})"
+            description: "One partition on this replica holds more than 300 active parts for 10 minutes — the dimension parts_to_delay_insert and parts_to_throw_insert actually enforce. Today's otel.* partition is the usual culprit: small, frequent inserts outrunning merges. Delayed inserts come next, then Too many parts rejections."
 
         # Event-counter names verified on the Kind cluster 2026-08-22, and THREE
         # of the four alerts that stood here were deleted because the series they
@@ -211,7 +285,8 @@ spec:
         # included, so those two are re-pointable at
         # ClickHouseProfileEvents_{RejectedInserts,FailedInsertQuery} and
         # verifiable at rest. Recorded as a follow-up rather than widened into
-        # this PR.
+        # that PR — closed 2026-09-08 by ClickHouseInsertsRejected and
+        # ClickHouseInsertsFailing directly below ClickHouseInsertsDelayed.
         #
         # This is exactly the failure the VERIFY-AT-KIND convention was invented
         # for: an expression naming a series that does not exist loads cleanly,
@@ -236,6 +311,48 @@ spec:
             runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsDelayed.md"
             summary: "ClickHouse throttling inserts ({{ $labels.hostname }})"
             description: "Inserts are being slowed by the parts_to_delay_insert guard — the step before outright rejection. Watch the parts and merges panels."
+
+        # The terminal link of parts -> delayed -> rejected, restored on the
+        # names the 2026-08-28 CORRECTION above called verifiable: the :9363
+        # endpoint publishes every ProfileEvent at zero, so both series exist
+        # at rest and `rate() > 0` is checkable at the gate. The compose twin
+        # (local-stack/observability/vmalert/rules/clickhouse.yaml) has carried
+        # both under these exact names since 2026-08-13; the cluster lacked
+        # them only because the exporter could not prove the names existed.
+        # Warning, not critical: the collector's sending_queue and
+        # retry_on_failure absorb a rejection burst, and ClickHouseExporterUnhealthy
+        # fires when they stop absorbing — that one is the page.
+        # RejectedInserts is the too-many-parts guard specifically.
+        # FailedInsertQuery is every INSERT that errored for ANY reason — a
+        # schema mismatch after a collector upgrade, a readonly replica, a bad
+        # password — so it is the broader net and the runbook starts by asking
+        # which. The schema Job runs DDL only, so it does not trip it.
+        # Audit source (2026-09-08): awesome-prometheus-alerts
+        # ClickHouseRejectedInsertQueries; `max by (replica)` and the job filter
+        # are ours, and `rate() > 0` replaces the source's `increase[1m] > 2`
+        # because two rejections a minute is already a broken pipeline.
+        # VERIFY-AT-KIND: both unthresholded forms return 3 series at 0.
+        - alert: ClickHouseInsertsRejected
+          expr: max by (replica) (rate(ClickHouseProfileEvents_RejectedInserts{job="clickhouse-server"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsRejected.md"
+            summary: "ClickHouse rejecting inserts ({{ $labels.replica }})"
+            description: "The parts_to_throw_insert guard has been rejecting INSERTs on this replica for 5 minutes (Too many parts). The collector retries, then drops; ClickHouseInsertsDelayed and ClickHouseTooManyPartsPerPartition should already be firing. Merges are not keeping up — check merge failures and memory before touching the guard."
+
+        - alert: ClickHouseInsertsFailing
+          expr: max by (replica) (rate(ClickHouseProfileEvents_FailedInsertQuery{job="clickhouse-server"}[5m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseInsertsFailing.md"
+            summary: "ClickHouse INSERT queries failing ({{ $labels.replica }})"
+            description: "INSERT queries on this replica have been erroring for 5 minutes — telemetry rows are being refused at the door. This counter covers every cause: too many parts (see ClickHouseInsertsRejected), a readonly replica, a schema that no longer matches what the collector sends, or credentials. Break it down by error code with ClickHouseErrorMetric_* or system.query_log."
 
         # system.errors is broad by design: a sustained error rate across the
         # server is worth a look even when no specific alert fired.
@@ -363,7 +480,8 @@ spec:
         # that condemned three sibling alerts on 2026-08-22 — and at least two of
         # those names (RejectedInserts, FailedInsertQuery) are real ClickHouse
         # events which were simply idle on a quiet lab. Restoring them on
-        # verifiable names is recorded as a follow-up, not smuggled in here.
+        # verifiable names was recorded as a follow-up, not smuggled in here —
+        # and landed 2026-09-08 as ClickHouseInsertsRejected / InsertsFailing.
         #
         # The server's own :9363 endpoint writes every ProfileEvent
         # unconditionally, zeros included, so this name IS checkable at the gate
@@ -512,3 +630,91 @@ spec:
             runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseReadonlyReplica.md"
             summary: "ClickHouse replica is read-only ({{ $labels.replica }})"
             description: "This replica has lost its ClickHouse Keeper session and can no longer accept writes or fetch parts. Reads still succeed, so the topology looks healthy from the outside while one of three copies falls behind. Check the keeper quorum first: kubectl -n monitoring get pods -l clickhouse-keeper.altinity.com/chk=keeper."
+
+        # --- Replication, measured from each replica's own :9363 endpoint ---
+        #
+        # Three rules from the awesome-prometheus-alerts audit (2026-09-08),
+        # each a replicated-topology failure nothing above observes directly.
+        # Everything else here about replication is a symptom seen from one
+        # side: KeeperNoLeader is the quorum's view of itself, ZooKeeperExceptions
+        # is a rate of network errors, ReadonlyReplica is the end state. None
+        # of them can say "this replica is twenty minutes behind its peers" —
+        # which, behind a 3-replica round-robin Service, means a third of
+        # Grafana queries read stale data with no error anywhere.
+
+        # ReplicasMaxAbsoluteDelay: the largest absolute_delay over every
+        # Replicated table on this replica, in seconds — how far its applied
+        # replication log trails the freshest replica. 300s is the audit
+        # source's threshold, kept as is: at the collector's batch cadence a
+        # healthy replica sits at 0-2s, and five minutes behind means the fetch
+        # queue is stuck (network, disk, a part that fails to fetch), not busy.
+        # The exporter publishes the same number as
+        # chi_clickhouse_metric_ReplicasMaxAbsoluteDelay per hostname; :9363 is
+        # read here for the `replica` label and for consistency with the rest
+        # of the per-replica rules.
+        # VERIFY-AT-KIND: unthresholded, 3 series at ~0. Then hold one
+        # replica's pod down for >5m and confirm its peers do NOT fire (delay is
+        # measured on the replica that is behind, which is the one that is
+        # down) while the fetch queue drains on its return.
+        - alert: ClickHouseReplicationLag
+          expr: max by (replica) (ClickHouseAsyncMetrics_ReplicasMaxAbsoluteDelay{job="clickhouse-server"}) > 300
+          for: 10m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseReplicationLag.md"
+            summary: "ClickHouse replica more than 5 minutes behind ({{ $labels.replica }})"
+            description: "This replica's replication log trails the freshest replica by {{ $value | humanizeDuration }}. Queries the round-robin Service sends here return stale data with no error; the collector keeps writing to the others. Check system.replicas for queue_size and the oldest queue entry's last_exception — a single un-fetchable part blocks everything behind it."
+
+        # ZooKeeperSession is a gauge of live Keeper sessions on this server:
+        # exactly 1 when healthy — ClickHouse's own description says it "should
+        # be no more than one" — and 0 while the session is lost or being
+        # re-established. It sits between the two signals this file already
+        # had. ZooKeeperExceptions is a rate and goes quiet the moment the
+        # server stops retrying; ReadonlyReplica needs a table to actually flip,
+        # which the 2026-08-28 keeper drills never produced because every
+        # session re-established inside session_timeout_ms (30000). This gauge
+        # drops to 0 the instant the connection is gone, so it is the one
+        # replication signal a Keeper pod restart DOES exercise, and its
+        # healthy value is checkable at rest.
+        # 2m, not 5m: a session re-establishes in seconds, and against a 30s
+        # scrape two consecutive misses already mean something.
+        # The job= filter is load-bearing — see ServerErrorsElevated for the
+        # ClickHouseMetrics_* overlap with job="keeper-keeper".
+        # VERIFY-AT-KIND: unthresholded, 3 series all exactly 1; then delete
+        # one keeper pod and watch the gauge on each replica for the dip.
+        - alert: ClickHouseKeeperSessionLost
+          expr: max by (replica) (ClickHouseMetrics_ZooKeeperSession{job="clickhouse-server"}) < 1
+          for: 2m
+          labels:
+            severity: warning
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseKeeperSessionLost.md"
+            summary: "ClickHouse replica has no Keeper session ({{ $labels.replica }})"
+            description: "This replica has had no live ClickHouse Keeper session for 2 minutes. Past session_timeout_ms (30s) every Replicated table on it turns readonly (ClickHouseReadonlyReplica follows) and it stops fetching parts. Check the quorum (ClickHouseKeeperNoLeader / QuorumDegraded) and this pod's network path to keeper-keeper:2181 — system.zookeeper_connection on the replica shows is_expired and the host it last reached."
+
+        # ReplicatedDataLoss: the replica needed a part, asked every peer
+        # including the offline ones, and none had it. ClickHouse gives up and
+        # moves on, so the rows are gone; the only trace is this counter and a
+        # log line. Critical at the first increment — there is no rate at which
+        # losing telemetry rows is acceptable — and `increase[10m]` rather than
+        # rate() so one event stays visible for ten minutes against a 30s
+        # scrape. On this platform the way to get here is losing one replica's
+        # PVC while its peers had already TTL-dropped the part, or a broken
+        # part detached on every copy — check in that order.
+        # Audit source (2026-09-08): awesome-prometheus-alerts
+        # ClickHouseReplicatedDataLoss, widened from [1m] to [10m].
+        # VERIFY-AT-KIND: unthresholded `ClickHouseProfileEvents_ReplicatedDataLoss`
+        # returns 3 series at 0 (ProfileEvents are published at zero).
+        - alert: ClickHouseReplicatedDataLoss
+          expr: max by (replica) (increase(ClickHouseProfileEvents_ReplicatedDataLoss{job="clickhouse-server"}[10m])) > 0
+          for: 1m
+          labels:
+            severity: critical
+            category: observability
+          annotations:
+            runbook_url: "https://github.com/duynhlab/homelab/blob/main/docs/observability/runbooks/clickhouse/ClickHouseReplicatedDataLoss.md"
+            summary: "ClickHouse replicated data loss on {{ $labels.replica }}"
+            description: "A part this replica needed exists on no replica, online or offline — the rows are gone and ClickHouse has stopped trying. Find the part in this replica's logs (ReplicatedDataLoss / 'No active replica has part'), then check the other two for a matching detached or TTL-dropped part. Nothing recovers this automatically; the question is how many rows and whether VictoriaLogs/VictoriaTraces still hold the window."

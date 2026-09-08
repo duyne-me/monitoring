@@ -393,14 +393,16 @@ Consumers that exist today:
 - **Recording rules** — 10, all prefixed `edge:` or `edge_cluster:`
   (`edge:rq_5xx_ratio:rate5m`, `edge:latency_ms:p95_5m`, …). Alerts and
   dashboards read the rules, not raw stats, so a stat rename is a one-file fix.
-- **Alerts** — 12 in
+- **Alerts** — 16 in
   `prometheusrules/envoy-gateway/alerts.yaml`, catalogued in
   [alert-catalog.md § 2](../observability/alerting/alert-catalog.md): `EdgeDown`,
   `Edge5xxRatioHigh`/`Critical`, `EdgeLatencyP95High`/`Critical`,
   `EdgeNoTraffic`, `Edge429RatioHigh`, `EdgeUpstreamUnhealthy`,
+  `EdgeUpstreamNoHealthyEndpoints`, `EdgeUpstreamTimeoutRatioHigh`,
+  `EdgeCertExpiringSoon`/`EdgeCertExpired`,
   `EdgeJWKSFetchFailing`, `EdgeAuthDeniedRatioHigh`,
   `EnvoyGatewayControllerDown`, `EnvoyGatewayReconcileErrors`.
-- **Runbooks** — 10 under
+- **Runbooks** — 13 under
   [`runbooks/envoy-gateway/`](../observability/runbooks/envoy-gateway/README.md);
   the `High`/`Critical` pairs share one runbook each.
 
@@ -408,7 +410,13 @@ Two of those alerts only exist because of this platform's specific failure
 history: `EdgeJWKSFetchFailing` watches the dependency that took every guarded
 route down when the identity NetworkPolicy was short two namespaces, and
 `EdgeNoTraffic` catches the silent-misconfiguration class where the edge serves
-200s while emitting nothing.
+200s while emitting nothing. A third joined them on 2026-09-08:
+`EdgeUpstreamTimeoutRatioHigh` is the checkout CPU-limit incident expressed as a
+metric — one route's backend crossing the 15 s `requestTimeout` served 504/UT
+while the edge-wide 5xx ratio never moved, so no alert fired. The cert pair from
+the same audit covers the hop cert-manager cannot see: a renewed Secret that
+never reaches the fleet over SDS leaves the `Certificate` Ready and the listener
+on the old certificate.
 
 ## Operations
 

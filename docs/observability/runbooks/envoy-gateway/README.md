@@ -1,8 +1,8 @@
 # Envoy Gateway Edge Alert Runbooks
 
-Per-alert investigation guides for the platform edge (ADR-044). Ten files cover
-twelve alerts: the paired High/Critical severities share one runbook, because
-the investigation is identical and only the urgency differs.
+Per-alert investigation guides for the platform edge (ADR-044). Thirteen files
+cover sixteen alerts: the paired High/Critical severities share one runbook,
+because the investigation is identical and only the urgency differs.
 
 | Quick facts | |
 |---|---|
@@ -38,6 +38,9 @@ are in seconds — the single most common misreading of an edge dashboard.
 | `EdgeNoTraffic` | [EdgeNoTraffic](EdgeNoTraffic.md) | Healthy fleet, zero requests — which route stopped matching? |
 | `Edge429RatioHigh` | [Edge429RatioHigh](Edge429RatioHigh.md) | Abusive client contained, or real users clipped? |
 | `EdgeUpstreamUnhealthy` | [EdgeUpstreamUnhealthy](EdgeUpstreamUnhealthy.md) | Does Kubernetes agree the endpoints are unhealthy? |
+| `EdgeUpstreamNoHealthyEndpoints` | [EdgeUpstreamNoHealthyEndpoints](EdgeUpstreamNoHealthyEndpoints.md) | Zero healthy — are the pods down, or did only Envoy give up on them? |
+| `EdgeUpstreamTimeoutRatioHigh` | [EdgeUpstreamTimeoutRatioHigh](EdgeUpstreamTimeoutRatioHigh.md) | Is the backend slow, throttled, or waiting on its own dependency? |
+| `EdgeCertExpiringSoon` · `EdgeCertExpired` | [EdgeCertExpiry](EdgeCertExpiry.md) | Did renewal fail, or did the renewed Secret never reach the proxies? |
 | `EdgeJWKSFetchFailing` | [EdgeJWKSFetchFailing](EdgeJWKSFetchFailing.md) | How long until cached keys expire and everything 401s? |
 | `EdgeAuthDeniedRatioHigh` | [EdgeAuthDeniedRatioHigh](EdgeAuthDeniedRatioHigh.md) | Mass 401s — expired keys, a broken realm, or an attack? |
 | `EnvoyGatewayControllerDown` | [EnvoyGatewayControllerDown](EnvoyGatewayControllerDown.md) | What breaks next, given traffic is still fine? |
@@ -74,4 +77,4 @@ domain's additions.
   ports once the job label is substituted.
 
 ---
-_Last updated: 2026-08-19 — template pointer added (canonical template lives at the runbooks parent)_
+_Last updated: 2026-09-08 — three runbooks added from the awesome-prometheus-alerts audit (`EdgeUpstreamNoHealthyEndpoints`, `EdgeUpstreamTimeoutRatioHigh`, the shared `EdgeCertExpiry`); 10 files / 12 alerts → 13 / 16. Previously 2026-08-19 — template pointer added (canonical template lives at the runbooks parent)_
