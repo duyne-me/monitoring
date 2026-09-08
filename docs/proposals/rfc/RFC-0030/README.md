@@ -2,7 +2,7 @@
 
 | Status | Scope | Research | Created | Last updated |
 |--------|-------|----------|---------|--------------|
-| provisional | platform-wide | [./research.md](./research.md) — PeerDB direction audited 2026-09-08 | 2026-09-07 | 2026-09-08 |
+| provisional | platform-wide | [./research.md](./research.md) — PeerDB + `pg_cron` direction audited 2026-09-08 | 2026-09-07 | 2026-09-08 |
 
 > **Architecture proposal only.** PeerDB, the commerce schema, the analytics
 > workloads, and the Admin route are planned and not deployed. PostgreSQL stays
@@ -15,6 +15,9 @@
       CDC before acceptance; this RFC and its research were rewritten together.
 - [x] Context7 findings were cross-checked against versioned official sources.
 - [x] Current source migrations and platform manifests were audited.
+- [x] The owner selected a custom CNPG system image and `pg_cron` for the
+      source heartbeat; its artifact, preload, activation, restore, and
+      failover lifecycle is now an independent resulting decision.
 - [ ] A prototype must close the release/chart, freshness, column-publication,
       schema-evolution, and CNPG failover gates before this RFC can be Accepted.
 - [x] No ADR number is reserved and no component is installed by this change.
@@ -29,10 +32,10 @@ tombstones. A thin read-only `analytics-service` exposes one staff endpoint,
 and the Admin Portal consumes it from a lazy `/analytics` page.
 
 The freshness objective is **two minutes end to end**, not a two-minute batch
-schedule. A 30-second heartbeat row in each source database proves the complete
-source → WAL → PeerDB → staging → ClickHouse path even when business traffic is
-idle. A small reconciliation command checks correctness; it is not a second
-ingestion engine.
+schedule. `pg_cron` updates one heartbeat row in each source database every 30
+seconds, proving the complete source → WAL → PeerDB → staging → ClickHouse path
+even when business traffic is idle. A small reconciliation command checks
+correctness; it is not a second ingestion engine.
 
 ## Motivation
 
@@ -48,6 +51,12 @@ It does not replace the semantic API, authorization, reconciliation, or
 operational ownership described here. Detailed evidence and limitations are in
 [research](./research.md).
 
+The heartbeat deliberately uses a PostgreSQL-native scheduler instead of adding
+another long-running workload. That saves an external credential and network
+path, but makes the `pg_cron` artifact, preload restart, extension activation,
+backup restore, and DR-image compatibility part of the database platform's
+owned lifecycle.
+
 ### Goals
 
 - Continuously ingest the seven selected base tables with target-observed
@@ -60,8 +69,8 @@ operational ownership described here. Detailed evidence and limitations are in
   values, UTC boundaries, and per-currency isolation.
 - Make per-source lag, stale data, unknown progress, and unavailability
   explicit to the API consumer and on-call.
-- Keep source, heartbeat-write, PeerDB control, ClickHouse ingest, and
-  ClickHouse read privileges separate.
+- Keep source replication, heartbeat execution, PeerDB control, ClickHouse
+  ingest, and ClickHouse read privileges separate.
 - Prove snapshots, updates, deletes, failover, replay, and PII exclusion before
   acceptance.
 
@@ -75,8 +84,8 @@ operational ownership described here. Detailed evidence and limitations are in
 - Replacing service APIs or moving transactional authority to ClickHouse.
 - Kafka/Redpanda, Debezium, a custom `pgoutput` consumer, or a parallel batch
   ingestion pipeline.
-- Installing `pg_cron`, `pg_duckdb`, `pg_mooncake`, TimescaleDB, Citus, or
-  a columnar PostgreSQL extension in v1.
+- Installing `pg_duckdb`, `pg_mooncake`, TimescaleDB, Citus, or a columnar
+  PostgreSQL extension in v1.
 - Promising transparent schema evolution or zero-resnapshot CNPG failover
   before the prototype proves those properties.
 - Replacing the operational Home dashboard.
@@ -92,9 +101,14 @@ operational ownership described here. Detailed evidence and limitations are in
    existing Temporal through a dedicated `peerdb` namespace, RustFS through a
    dedicated `peerdb-staging` bucket/identity, and `platform-db` through a
    dedicated PeerDB catalog database/role.
-3. Update one technical heartbeat row per source every 30 seconds using the
-   PostgreSQL server clock. Measure freshness only when that timestamp is
-   visible in ClickHouse after normalization.
+3. Package `postgresql-18-cron` in a digest-pinned custom CNPG system image,
+   deploy that compatible image to `product-db` and `product-db-replica`, then
+   preload and activate `pg_cron` only after artifact and restore validation.
+   Install its metadata in the `postgres` database and use one narrow
+   `analytics_heartbeat` execution role, background workers, and three
+   `cron.schedule_in_database()` jobs to update one technical row per source
+   every 30 seconds with `clock_timestamp()`. Measure freshness only when that
+   timestamp is visible in ClickHouse after normalization.
 4. Write versioned raw rows with `_peerdb_version`, `_peerdb_is_deleted`, and
    sync metadata. Serving views select the latest version with `argMax`, then
    discard tombstones.
@@ -124,13 +138,15 @@ operational ownership described here. Detailed evidence and limitations are in
 **Chosen option:** undecided — architecture review pending
 
 **Provisional recommendation:** self-hosted PeerDB PostgreSQL → ClickHouse CDC,
-an isolated commerce model, and a thin read-only `analytics-service`.
+`pg_cron` source heartbeats, an isolated commerce model, and a thin read-only
+`analytics-service`.
 
 This replaces the earlier 15-minute batch proposal before acceptance. PeerDB
 removes a bespoke snapshot/checkpoint/retry transport and provides continuous
 update/delete capture. The cost is a real control plane, logical slots and WAL
-risk, broad-read credentials on selected tables, full initial snapshots, and
-several upstream behaviors that the acceptance prototype must verify.
+risk, broad-read credentials on selected tables, full initial snapshots, an
+owned custom PostgreSQL image/preload lifecycle, and several upstream behaviors
+that the acceptance prototype must verify.
 
 ## Architecture
 
@@ -144,6 +160,7 @@ flowchart LR
   EDGE["Envoy Gateway<br/>deployed staff issuer"]
 
   subgraph PG["product-db — deployed CNPG"]
+    CRON["pg_cron scheduler<br/>planned — primary only"]
     ORD[("order DB<br/>publication + heartbeat<br/>planned")]
     CHECK[("checkout DB<br/>publication + heartbeat<br/>planned")]
     PAY[("payment DB<br/>publication + heartbeat<br/>planned")]
@@ -163,11 +180,10 @@ flowchart LR
     SERVE[("commerce serving<br/>planned")]
   end
 
-  HEART["analytics heartbeat<br/>planned — 30 seconds"]
   ANA["analytics-service<br/>planned — read only"]
   PAGE["Admin /analytics<br/>planned"]
 
-  HEART -.->|"planned narrow UPSERT"| ORD & CHECK & PAY
+  CRON -.->|"planned 30-second UPSERT"| ORD & CHECK & PAY
   ORD & CHECK & PAY -.->|"planned direct TLS CDC"| FLOW
   SNAP --- FLOW
   FLOW --- APICTL & CAT & TEMP
@@ -186,7 +202,7 @@ flowchart LR
   class STAFF external;
   class EDGE edge;
   class PG,CH data;
-  class ORD,CHECK,PAY,FLOW,SNAP,APICTL,CAT,TEMP,STAGE,RAW,SERVE,HEART,ANA,PAGE planned;
+  class CRON,ORD,CHECK,PAY,FLOW,SNAP,APICTL,CAT,TEMP,STAGE,RAW,SERVE,ANA,PAGE planned;
 ```
 
 **Legend** — grey: human client · blue: deployed edge · green: deployed data
@@ -246,10 +262,11 @@ name every allowed column; a schema addition is excluded until reviewed.
 | `payment` | `ledger_accounts` | `id`, `name`, `type` |
 
 Each database also owns `analytics_cdc_heartbeat(id, emitted_at)`, with one
-fixed primary-key row updated with `clock_timestamp()`. Replica-identity columns
-are mandatory in every
-publication column list. All selected tables currently have primary keys; the
-ledger tables are append-only by trigger.
+fixed primary-key row updated every 30 seconds with `clock_timestamp()`. One
+`pg_cron` installation in the cluster's `postgres` database schedules the three
+database-local jobs with `cron.schedule_in_database()`. Replica-identity columns
+are mandatory in every publication column list. All selected tables currently
+have primary keys; the ledger tables are append-only by trigger.
 
 Forbidden data includes `user_id`, address JSON, shipping method, promo data,
 payment method/token, provider identifiers, `external_ref`, decline/reason
@@ -321,15 +338,23 @@ visible UTC/freshness labels, and accessible table equivalents for charts.
 ## Security considerations
 
 - CNPG `Publication` resources reconcile the three publications as GitOps;
-  source migrations create the heartbeat objects and exact ACLs. PeerDB does
-  not receive DDL or ownership.
-- Use one non-owning PeerDB login per database and one narrow heartbeat writer
-  per database. CNPG `DatabaseRole` manages login/password lifecycle, not
-  publications or table ACLs.
+  an idempotent source DDL step creates the heartbeat objects, exact ACLs, and
+  named cron jobs. PeerDB does not receive DDL or ownership.
+- Use one non-owning PeerDB login per source database and one cluster-wide,
+  non-owning `analytics_heartbeat` role that can modify only the three technical
+  heartbeat tables. Background-worker execution removes the external heartbeat
+  password, HBA rule, network path, and workload. CNPG `DatabaseRole` manages
+  role attributes; DDL owns the table grants and cron schedules.
+- Use a digest-pinned custom image derived from the deployed PostgreSQL 18.1
+  system image. The artifact must exist before adding `pg_cron` to
+  `shared_preload_libraries`; a missing library prevents PostgreSQL startup.
+- Install `pg_cron` only in `postgres`, use UTC and background workers, cap its
+  concurrent jobs, and retain seven days of `cron.job_run_details`.
 - Connect PeerDB directly to `product-db-rw.product.svc:5432` using TLS.
   Logical decoding cannot use PgDog or `product-db-ro`.
 - Separate PeerDB control, catalog, staging, ClickHouse ingest, ClickHouse read,
-  and heartbeat credentials. OpenBAO/ESO delivers every Secret.
+  and the heartbeat execution role. OpenBAO/ESO delivers credentials that still
+  require Secrets; background-worker heartbeats require none.
 - Keep PeerDB UI and administrative APIs cluster-internal. The public API gets
   no source, staging, catalog, Temporal, or ClickHouse-write credentials.
 - NetworkPolicy allows only the exact workload-to-service paths. New workloads
@@ -345,6 +370,8 @@ The transactional services gain no analytics dependency or shared error
 budget. Before exposure, instrument and dashboard:
 
 - target-observed heartbeat lag for each source;
+- `pg_cron` job success, failure, duration, last completion, scheduler state,
+  run-history growth, and background-worker headroom;
 - PostgreSQL, PeerDB, ClickHouse, and API host clock skew;
 - slot active state, retained WAL bytes/time, invalidation, and restart LSN;
 - snapshot/catch-up progress, rows, commit lag, retries, and errors per mirror;
@@ -355,37 +382,48 @@ budget. Before exposure, instrument and dashboard:
 - analytics API request duration, errors, and response freshness state.
 
 Alert at two minutes (warning) and five minutes or unknown (critical). The
-runbook must distinguish a stopped heartbeat writer, a lagging logical slot, a
-stalled PeerDB flow, staging failure, ClickHouse normalization lag, and a
-freshness query failure.
+runbook must distinguish a stopped or failed `pg_cron` job, exhausted background
+workers, a lagging logical slot, a stalled PeerDB flow, staging failure,
+ClickHouse normalization lag, and a freshness query failure. Cron success is a
+diagnostic signal; only the timestamp observed in ClickHouse proves freshness.
 
 ## Rollout and rollback
 
 Roll out in dependency order, with each phase blocked on its evidence:
 
 1. **Prototype:** pin PeerDB core and chart/image digests; review AGPL/ELv2;
-   prove the chart/image combination, resource floor, and external dependency
-   configuration.
-2. **Source safety:** size `max_replication_slots`, `max_wal_senders`,
+   prove the chart/image combination and resource floor. Build the custom CNPG
+   system image with `postgresql-18-cron`, pin its digest, scan it, verify the
+   library/control/SQL files and `pg_available_extensions`, and restore a backup
+   with that exact artifact before any preload change.
+2. **Extension safety:** place the compatible custom image on
+   `product-db-replica` first, then roll `product-db`; add `pg_cron` and the same
+   cron parameters to both Cluster resources only after the artifact gate.
+   Configure the `postgres` metadata database, UTC, no superuser jobs,
+   background-worker execution, and bounded concurrency. Prove restart,
+   switchover, promotion, and worker headroom.
+3. **Source safety:** size `max_replication_slots`, `max_wal_senders`,
    `max_slot_wal_keep_size`, connections, and WAL storage. Create roles, exact
    HBA/TLS/NetworkPolicy, heartbeat tables, CNPG column-list `Publication`
-   resources with reclaim `retain`, and mirror exclusions. Require
+   resources with reclaim `retain`, named 30-second cron jobs, a daily
+   seven-day run-history cleanup job, and mirror exclusions. Require
    `status.applied=true` at the observed generation before creating a mirror.
-3. **Isolated dependencies:** create the `peerdb` Temporal namespace,
+4. **Isolated dependencies:** create the `peerdb` Temporal namespace,
    `peerdb-staging` RustFS bucket/identity, and dedicated PeerDB catalog
    database/role in `platform-db`.
-4. **Analytical storage:** create least-privilege ClickHouse identities and
+5. **Analytical storage:** create least-privilege ClickHouse identities and
    replicated raw/serving objects through a dedicated schema wave.
-5. **Mirrors:** start and validate order, then checkout, then payment. Observe
+6. **Mirrors:** start and validate order, then checkout, then payment. Observe
    full snapshot source/WAL/ClickHouse load and catch-up before adding the next.
-6. **Correctness gate:** prove insert/update/delete/tombstone behavior, column
-   exclusion, 30-second heartbeats, ≤2-minute freshness, reconciliation,
-   schema-change recovery, CNPG switchover/failover, and WAL-cap resync.
-7. **Dark launch:** deploy the read API without gateway or Admin navigation;
+7. **Correctness gate:** prove insert/update/delete/tombstone behavior, column
+   exclusion, 30-second `pg_cron` heartbeats, ≤2-minute freshness,
+   reconciliation, schema-change recovery, CNPG switchover/failover, and
+   WAL-cap resync.
+8. **Dark launch:** deploy the read API without gateway or Admin navigation;
    run metric, authorization, failure, and performance tests.
-8. **Consumer:** add the protected route, then the Admin page only after the
+9. **Consumer:** add the protected route, then the Admin page only after the
    previous gates pass.
-9. **Close-out:** run the full release audit; update `docs/api/`, platform docs,
+10. **Close-out:** run the full release audit; update `docs/api/`, platform docs,
    runbooks, ADR Adoption, RFC history, and CHANGELOG.
 
 Rollback removes Admin navigation and gateway reachability first, then stops
@@ -393,7 +431,10 @@ the API and pauses mirrors. Keep raw data and logical slots while deciding
 resume versus resync. Dropping a mirror can drop its slot; never remove a slot
 until retained-WAL impact and recovery intent are explicit. Cleanup of source
 publications, heartbeat objects, catalog, and staging is a later reviewed step.
-No rollback writes transactional business data.
+Disable new cron launches first with `cron.launch_active_jobs=off`; preserve the
+image, preload, extension, and job history during diagnosis. Removing the
+extension or preload is a separate reviewed rollout because it requires another
+restart. No rollback writes transactional business data.
 
 ## Testing and acceptance
 
@@ -405,6 +446,10 @@ No rollback writes transactional business data.
   network path; verify recovery and bounded WAL.
 - Rotate every credential and prove least privilege with positive and negative
   connection tests.
+- Verify the custom image on every primary/standby and restored cluster, then
+  prove missing-library admission is caught before rollout. Inspect
+  `cron.job_run_details`, background-worker capacity, overlap behavior, history
+  cleanup, scheduler disable/enable, restart, and promotion.
 - Exercise CNPG switchover and unplanned failover. Acceptance requires no gap,
   or an explicit resync/runbook decision if PeerDB slots cannot resume safely.
 - Exercise additive, dropped, and type-changing source columns. Do not claim
@@ -427,8 +472,10 @@ The RFC cannot become Accepted until the prototype additionally proves:
 2. PostgreSQL publication column lists plus PeerDB exclusions across snapshot
    and CDC;
 3. a target-observed heartbeat rather than status-derived freshness;
-4. exact schema-evolution recovery on the pinned build; and
-5. CNPG logical-slot behavior through switchover and failover.
+4. the custom image, preload, activation, restore, rollback, and `pg_cron`
+   promotion lifecycle;
+5. exact schema-evolution recovery on the pinned build; and
+6. CNPG logical-slot behavior through switchover and failover.
 
 ## Alternatives
 
@@ -438,7 +485,7 @@ The RFC cannot become Accepted until the prototype additionally proves:
 | Service export APIs | Adds three bulk contracts and repeated serialization/application load for a warehouse-shaped path |
 | Direct PostgreSQL analytics or materialized views | Keeps interactive OLAP and cross-database orchestration on transactional infrastructure |
 | `pg_duckdb`, `pg_mooncake`, TimescaleDB, Citus/columnar extensions | Adds operand packaging/preload/upgrade/DR duties and does not remove the three-database semantic boundary |
-| `pg_cron` heartbeat | Official PeerDB guidance shows a short-period heartbeat, but the extension is not in the deployed CNPG inventory; adding an extension only for freshness is more invasive than a narrow existing-service command |
+| External heartbeat command/workload | Avoids a PostgreSQL extension, but adds an image command, Deployment/CronJob lifecycle, credential, HBA and network path solely to update three technical rows |
 | Debezium plus Kafka/Redpanda | Strong general event backbone, but broker, Connect, topics, schemas, replay, and ordering exceed one analytical consumer |
 | ClickHouse `MaterializedPostgreSQL` | Experimental/maturity and DDL constraints do not meet the default production bar |
 | Custom `pgoutput` consumer | Permanently transfers snapshot, checkpoint, type mapping, retry, DDL, and support ownership to the platform |
@@ -453,6 +500,7 @@ reserved while the RFC is provisional.
 |----------|-----|--------|
 | Adopt self-hosted PeerDB PostgreSQL → ClickHouse CDC with isolated reuse of Temporal, RustFS, and `platform-db` | TBD at architecture review | Not created |
 | Manage allowlisted base-table columns through CNPG `Publication` resources and accept table-wide source `SELECT` for the replication credential | TBD at architecture review | Not created |
+| Package and operate `pg_cron` in a custom CNPG system image for target-observed heartbeat scheduling | TBD at architecture review | Not created |
 | Add a thin read-only `analytics-service` as the ADR-048 aggregation escape hatch | TBD at architecture review | Not created |
 
 Expected contract updates after implementation are `docs/api/analytics.md`, the
@@ -462,6 +510,8 @@ relevant feature ownership in `docs/api/microservices.md`.
 
 ## Implementation history
 
+- 2026-09-08 — RFC selected a custom CNPG image plus `pg_cron` for the
+  target-observed heartbeat; no implementation or ADR created.
 - 2026-09-08 — RFC rewritten around PeerDB before acceptance; no implementation
   or ADR created.
 - 2026-09-07 — Earlier batch-first RFC published as `provisional`.
@@ -475,6 +525,8 @@ relevant feature ownership in `docs/api/microservices.md`.
 - [ADR-048 — Admin Portal has no BFF by default](../../adr/ADR-048-admin-portal-no-bff/)
 - [Admin consumer contract](../../../api/admin.md)
 - [PostgreSQL extension policy and inventory](../../../databases/extensions.md)
+- [`pg_cron` scheduler and operations](https://github.com/citusdata/pg_cron)
+- [CNPG shared preload configuration](https://cloudnative-pg.io/docs/1.30/postgresql_conf/#shared-preload-libraries)
 - [ClickHouse platform guide](../../../observability/clickhouse/README.md)
 
 ---

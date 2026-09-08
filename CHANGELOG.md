@@ -425,9 +425,11 @@ Skeleton (copy what you need):
 - **RFC-0030 changes its provisional transport from custom batch to PeerDB.**
   Owner review selected three database-local PostgreSQL → ClickHouse CDC mirrors
   and a target-observed freshness SLO of at most two minutes. The rewritten
-  research and RFC add explicit source column contracts, heartbeat-based idle
+  research and RFC add explicit source column contracts, `pg_cron`-based idle
   freshness, isolated Temporal/RustFS/catalog dependencies, WAL/failover/schema
-  gates, reconciliation, and three future ADR subjects. No component is
+  gates, reconciliation, and four future ADR subjects. The heartbeat design uses
+  a custom CNPG system image with explicit artifact, preload, activation,
+  restore, and rollback gates instead of an external writer. No component is
   installed and the RFC remains `provisional`.
 - **RFC-0030 advances to `provisional` for Backoffice commerce analytics.** The
   owner passed the research gate after the Context7, PostgreSQL extension, and
