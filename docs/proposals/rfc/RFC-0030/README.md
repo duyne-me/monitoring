@@ -136,11 +136,11 @@ owned lifecycle.
 
 ## Decision outcome
 
-**Chosen option:** undecided — ADR-066 through ADR-069 are under review
-
-**Provisional recommendation:** self-hosted PeerDB PostgreSQL → ClickHouse CDC,
-`pg_cron` source heartbeats, an isolated commerce model, and a thin read-only
-`analytics-service`.
+**Chosen option:** provisionally selected — self-hosted PeerDB PostgreSQL →
+ClickHouse CDC, explicit source allowlists, `pg_cron` source heartbeats, an
+isolated commerce model, and a thin read-only `analytics-service`. Final
+acceptance remains gated by prototype evidence and approval of ADR-066 through
+ADR-069.
 
 This replaces the earlier 15-minute batch proposal before acceptance. PeerDB
 removes a bespoke snapshot/checkpoint/retry transport and provides continuous
