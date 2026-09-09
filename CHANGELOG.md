@@ -422,6 +422,11 @@ Skeleton (copy what you need):
 
 #### Proposals
 
+- **RFC-0030 and ADR-066 through ADR-069 are `Accepted / Not started`.** The
+  records close the PeerDB transport, explicit source egress, `pg_cron`
+  freshness heartbeat, and read-only analytics serving decisions. Mandatory
+  Phase 0 qualification still blocks rollout; this documentation change
+  installs no component or API.
 - **RFC-0030 changes its provisional transport from custom batch to PeerDB.**
   Owner review selected three database-local PostgreSQL → ClickHouse CDC mirrors
   and a target-observed freshness SLO of at most two minutes. The rewritten
