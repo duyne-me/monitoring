@@ -1,94 +1,25 @@
-# Check Template — PR-only workflow
-#
-# Triggers on: pull_request to dev/uat/main
-# Purpose: run tests, lint, secret scanning, SonarCloud analysis
-#
-# This workflow only handles pull_request events. By not mixing push triggers,
-# GitHub status check names stay clean (no "(pull_request)" suffix), making
-# ruleset required-check matching predictable.
-#
-# Resulting check run names (for ruleset matching):
-#   go-check / Test
-#   go-check / Lint
-#   gitleaks / Gitleaks Scan
-#   sonar / SonarCloud Analysis
-#
-# Note: GitHub UI displays these with a prefix and suffix
-# (e.g. "Check / go-check / Test (pull_request)"), but rulesets
-# match against the shorter name shown above.
-#
-# Dynamic naming: Uses ${{ github.event.repository.name }} so this file is
-# identical across all service repos — no placeholders for project keys.
-#
-# Placeholders to replace:
-#   {{SLACK_CHANNEL_ID}}   — Slack channel for PR notifications
-#
-# See docs/platform/gitflow.md for the full branching & release standard.
-# See docs/platform/ruleset-automation.md for how rulesets enforce these checks.
-
+# Candidate pin from gha-workflows PR #119. Replace with the immutable v2
+# release commit before rolling this caller out to service repositories.
 name: Check
 
 on:
   pull_request:
-    branches: [dev, uat, main]
+    branches: [dev, main]
 
-permissions:
-  contents: read
-  pull-requests: read
-  security-events: write
+permissions: {}
 
 jobs:
-  # ──────────────────────────────────────────────────
-  # 1. PR Checks (Branch Name + Slack "PR Opened")
-  # ──────────────────────────────────────────────────
-  pr-checks:
-    uses: duynhlab/gha-workflows/.github/workflows/pr-checks.yml@main
+  check:
+    name: PR Gate
+    uses: duynhlab/gha-workflows/.github/workflows/check.yml@088207a7b6acf45db1e8e10324d1b6855f60cc12
     with:
-      slack_channel_id: "{{SLACK_CHANNEL_ID}}"
-    secrets:
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
-  # ──────────────────────────────────────────────────
-  # 2. Test & Lint
-  # ──────────────────────────────────────────────────
-  go-check:
-    uses: duynhlab/gha-workflows/.github/workflows/go-check.yml@main
-    with:
-      command-test: 'go test -race -coverprofile=coverage.out ./...'
-      lint: true
-    secrets: inherit
-
-  # ──────────────────────────────────────────────────
-  # 2b. Secret Detection (Gitleaks)
-  # ──────────────────────────────────────────────────
-  gitleaks:
-    uses: duynhlab/gha-workflows/.github/workflows/gitleaks.yml@main
-    permissions:
-      contents: read
-      security-events: write
-
-  # ──────────────────────────────────────────────────
-  # 3. SonarCloud Analysis
-  # ──────────────────────────────────────────────────
-  sonar:
-    needs: [go-check, gitleaks]
-    uses: duynhlab/gha-workflows/.github/workflows/sonarqube.yml@main
-    with:
-      project-key: 'duynhlab_${{ github.event.repository.name }}'
-      organization: 'duynhlab'
-      fail-on-quality-gate: false
+      image-name: ${{ github.event.repository.name }}
+      sonar-project-key: duynhlab_${{ github.event.repository.name }}
+      sonar-organization: duynhlab
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-  # ──────────────────────────────────────────────────
-  # 4. Status Notification
-  # ──────────────────────────────────────────────────
-  notify:
-    if: always()
-    needs: [pr-checks, go-check, gitleaks, sonar]
-    uses: duynhlab/gha-workflows/.github/workflows/status.yml@main
-    with:
-      slack_channel_id: "{{SLACK_CHANNEL_ID}}"
-      slack_thread_ts: ${{ needs.pr-checks.outputs.slack_thread_ts }}
-    secrets:
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      security-events: write
