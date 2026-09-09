@@ -422,6 +422,11 @@ Skeleton (copy what you need):
 
 #### Proposals
 
+- **RFC-0030 architecture review drafts ADR-066 through ADR-069 at `Proposed / Not started`.**
+  The records separate PeerDB transport, explicit source egress, `pg_cron`
+  freshness heartbeats, and the read-only analytics serving boundary. The RFC
+  remains `provisional`, its prototype gates still block acceptance, and this
+  documentation change installs no component or API.
 - **RFC-0030 changes its provisional transport from custom batch to PeerDB.**
   Owner review selected three database-local PostgreSQL → ClickHouse CDC mirrors
   and a target-observed freshness SLO of at most two minutes. The rewritten
