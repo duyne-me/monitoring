@@ -2,11 +2,12 @@
 
 | Status | Scope | Research | Created | Last updated |
 |--------|-------|----------|---------|--------------|
-| provisional | platform-wide | [./research.md](./research.md) — PeerDB + `pg_cron` direction audited 2026-09-08 | 2026-09-07 | 2026-09-09 |
+| Accepted | platform-wide | [./research.md](./research.md) — PeerDB + `pg_cron` direction audited 2026-09-08 | 2026-09-07 | 2026-09-09 |
 
-> **Architecture proposal only.** PeerDB, the commerce schema, the analytics
-> workloads, and the Admin route are planned and not deployed. PostgreSQL stays
-> authoritative; ClickHouse is a rebuildable, bounded-eventual read model.
+> **Accepted target architecture; not implemented.** PeerDB, the commerce
+> schema, the analytics workloads, and the Admin route are planned and not
+> deployed. PostgreSQL stays authoritative; ClickHouse is a rebuildable,
+> bounded-eventual read model.
 
 ## Prerequisites
 
@@ -18,10 +19,12 @@
 - [x] The owner selected a custom CNPG system image and `pg_cron` for the
       source heartbeat; its artifact, preload, activation, restore, and
       failover lifecycle is now an independent resulting decision.
-- [ ] A prototype must close the release/chart, freshness, column-publication,
-      schema-evolution, and CNPG failover gates before this RFC can be Accepted.
-- [x] ADR-066 through ADR-069 are drafted at `Proposed / Not started`; no
-      component is installed by those decision records.
+- [x] The owner accepted RFC-0030 and ADR-066 through ADR-069 on 2026-09-09.
+- [ ] Phase 0 implementation must close the release/chart, licence, freshness,
+      column-publication, schema-evolution, restore, and CNPG failover gates
+      before any component rollout.
+- [x] All four ADRs remain at Adoption `Not started`; acceptance installs no
+      component.
 
 ## Summary
 
@@ -136,11 +139,10 @@ owned lifecycle.
 
 ## Decision outcome
 
-**Chosen option:** provisionally selected — self-hosted PeerDB PostgreSQL →
-ClickHouse CDC, explicit source allowlists, `pg_cron` source heartbeats, an
-isolated commerce model, and a thin read-only `analytics-service`. Final
-acceptance remains gated by prototype evidence and approval of ADR-066 through
-ADR-069.
+**Chosen option:** self-hosted PeerDB PostgreSQL → ClickHouse CDC, explicit
+source allowlists, `pg_cron` source heartbeats, an isolated commerce model, and
+a thin read-only `analytics-service`, as accepted in ADR-066 through ADR-069.
+Implementation starts with the mandatory Phase 0 qualification gates below.
 
 This replaces the earlier 15-minute batch proposal before acceptance. PeerDB
 removes a bespoke snapshot/checkpoint/retry transport and provides continuous
@@ -467,7 +469,7 @@ restart. No rollback writes transactional business data.
 - Run `make validate`, compose/Kind k6 gates, and the complete local-stack A/B/C
   audit before tagging any affected service or frontend release.
 
-The RFC cannot become Accepted until the prototype additionally proves:
+Implementation cannot advance beyond Phase 0 until qualification proves:
 
 1. a compatible released chart/image combination;
 2. PostgreSQL publication column lists plus PeerDB exclusions across snapshot
@@ -494,16 +496,16 @@ The RFC cannot become Accepted until the prototype additionally proves:
 
 ## Resulting decisions
 
-Architecture review split these choices into one proposed ADR each. They remain
-non-authoritative until the RFC acceptance gates pass and the owner accepts the
-decisions.
+Architecture review split these choices into one accepted ADR each. Adoption is
+`Not started`; acceptance records the direction and does not claim the
+qualification or rollout evidence exists.
 
 | Decision | ADR | Status |
 |----------|-----|--------|
-| Adopt self-hosted PeerDB PostgreSQL → ClickHouse CDC with isolated reuse of Temporal, RustFS, and `platform-db` | [ADR-066](../../adr/ADR-066-adopt-peerdb-for-commerce-cdc/) | Proposed / Not started |
-| Manage allowlisted base-table columns through CNPG `Publication` resources and accept table-wide source `SELECT` for the replication credential | [ADR-067](../../adr/ADR-067-constrain-commerce-cdc-source-allowlist/) | Proposed / Not started |
-| Package and operate `pg_cron` in a custom CNPG system image for target-observed heartbeat scheduling | [ADR-068](../../adr/ADR-068-schedule-cdc-heartbeats-with-pg-cron/) | Proposed / Not started |
-| Add a thin read-only `analytics-service` as the ADR-048 aggregation escape hatch | [ADR-069](../../adr/ADR-069-serve-commerce-analytics-through-read-only-service/) | Proposed / Not started |
+| Adopt self-hosted PeerDB PostgreSQL → ClickHouse CDC with isolated reuse of Temporal, RustFS, and `platform-db` | [ADR-066](../../adr/ADR-066-adopt-peerdb-for-commerce-cdc/) | Accepted / Not started |
+| Manage allowlisted base-table columns through CNPG `Publication` resources and accept table-wide source `SELECT` for the replication credential | [ADR-067](../../adr/ADR-067-constrain-commerce-cdc-source-allowlist/) | Accepted / Not started |
+| Package and operate `pg_cron` in a custom CNPG system image for target-observed heartbeat scheduling | [ADR-068](../../adr/ADR-068-schedule-cdc-heartbeats-with-pg-cron/) | Accepted / Not started |
+| Add a thin read-only `analytics-service` as the ADR-048 aggregation escape hatch | [ADR-069](../../adr/ADR-069-serve-commerce-analytics-through-read-only-service/) | Accepted / Not started |
 
 Expected contract updates after implementation are `docs/api/analytics.md`, the
 service rollup in `docs/api/README.md`, the Admin consumer index
@@ -512,6 +514,9 @@ relevant feature ownership in `docs/api/microservices.md`.
 
 ## Implementation history
 
+- 2026-09-09 — Owner accepted RFC-0030 and ADR-066 through ADR-069. Adoption
+  remains `Not started`; the former acceptance blockers are mandatory Phase 0
+  qualification gates before rollout.
 - 2026-09-09 — Architecture review split the proposal into ADR-066 through
   ADR-069 at `Proposed / Not started`; RFC acceptance and implementation remain
   blocked on the prototype gates.

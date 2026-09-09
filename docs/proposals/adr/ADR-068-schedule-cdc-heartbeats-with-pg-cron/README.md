@@ -9,8 +9,8 @@
 
 | Attribute | Value |
 |-----------|-------|
-| **Status** | Proposed |
-| **Decision date** | — |
+| **Status** | Accepted |
+| **Decision date** | 2026-09-09 |
 | **Owners** | `duynhne` |
 | **Deciders** | `duynhne` |
 | **Scope** | Scheduling and operating the RFC-0030 source heartbeat on the `product-db` CNPG cluster |
@@ -203,6 +203,7 @@ A changed decision requires a new ADR that supersedes this one.
 | Date | Status / adoption | Change |
 |------|-------------------|--------|
 | 2026-09-09 | Proposed / Not started | Initial decision drafted during RFC-0030 architecture review |
+| 2026-09-09 | Accepted / Not started | Owner accepted the architecture; qualification remains Phase 0 of implementation |
 
 ---
 _Last updated: 2026-09-09._
