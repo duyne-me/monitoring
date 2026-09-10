@@ -338,7 +338,7 @@ services:
   # Mirrors the in-cluster topology (services → otel-collector → VictoriaTraces/Grafana),
   # with spanmetrics standing in for Tempo's metrics-generator locally.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.159.0 # contrib: spanmetrics connector lives here; 0.159.0 matches cluster (OTel logs schema 1.3.0, no TimestampTime)
+    image: otel/opentelemetry-collector-contrib:0.160.0 # contrib: spanmetrics connector lives here; 0.159.0 matches cluster (OTel logs schema 1.3.0, no TimestampTime)
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
