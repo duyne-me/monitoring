@@ -14,7 +14,7 @@ spec:
         kind: HelmRepository
         name: vector
         namespace: flux-system
-      version: '0.57.0'
+      version: '0.58.0'
   dependsOn:
     - name: victoria-metrics-operator
       namespace: monitoring
